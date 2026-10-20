@@ -1,0 +1,11 @@
+#!/bin/sh
+# Rejects a commit that breaks the Ghost Labs commit rules (DE-32).
+. "$(dirname "$0")/rules.sh"
+out=$(gl_check_message "$(cat "$1")"); ok=$?
+id=$(gl_check_ident "$(git var GIT_AUTHOR_IDENT) / $(git var GIT_COMMITTER_IDENT)") || { out="$out
+$id"; ok=1; }
+[ $ok = 0 ] && exit 0
+echo "Commit refused by Ghost Labs rules (.githooks/commit-msg, DE-32):" >&2
+echo "$out" >&2
+echo "Fix it and commit again. Do not use --no-verify." >&2
+exit 1

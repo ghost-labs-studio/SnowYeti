@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuses pushing a second unmerged claude/ branch for the same board key (DE-38).
+dir=$(dirname "$0")
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac   # a branch deletion
+  case "$remote_ref" in refs/heads/claude/*) sh "$dir/check-duplicate-branch.sh" "$remote_ref" || exit 1 ;; esac
+done
+exit 0
