@@ -1,5 +1,5 @@
 # security/accepted-findings (DE-49). Format and rules: .githooks/accepted-findings.example
 # The security hook itself has to start the scanners; bandit flags any use of subprocess. Reviewed in DE-49:
 # one call site, fixed argument lists, no shell, tools resolved to full paths. Renew only after a fresh review.
-bandit:B404:.githooks/security-scan.py:f28979739552 | 2027-04-28 | the scan hook imports subprocess to run the scanners; reviewed DE-49
-bandit:B603:.githooks/security-scan.py:394908d88149 | 2027-04-28 | the scan hook's one subprocess call, fixed args, no shell; reviewed DE-49
+bandit:B404:.githooks/security-scan.py:a294bde6af9c | 2027-04-28 | the scan hook imports subprocess to run the scanners; reviewed DE-49
+bandit:B603:.githooks/security-scan.py:7a7ff702e55a | 2027-04-28 | the scan hook's one subprocess call, fixed args, no shell; reviewed DE-49
