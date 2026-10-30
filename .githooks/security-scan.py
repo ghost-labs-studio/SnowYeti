@@ -40,12 +40,12 @@ BREW = {"gitleaks": "gitleaks", "semgrep": "semgrep", "bandit": "bandit", "shell
         "pip-audit": "pip-audit", "npm": "node", "cargo-audit": "cargo-audit"}
 
 
-def run(cmd, cwd=None, timeout=1800, text=True, data=None):
+def run(cmd, cwd=None, timeout=1800, text=True, data=None, extra_env=None):
     """The one place this script starts a process: a fixed argument list, no shell, the tool's full path."""
     exe = shutil.which(cmd[0])
     if not exe:
         raise RuntimeError(f"{cmd[0]} is not installed")
-    env = dict(os.environ, SEMGREP_SEND_METRICS="off", NO_COLOR="1")
+    env = dict(os.environ, SEMGREP_SEND_METRICS="off", NO_COLOR="1", **(extra_env or {}))
     return subprocess.run([exe, *cmd[1:]], cwd=cwd, capture_output=True, text=text, timeout=timeout, env=env, input=data)
 
 
@@ -184,8 +184,11 @@ class Scan:
             text = r.get("issue_text") or ""
             if r.get("test_id") in ("B105", "B106", "B107"):  # never echo a possible secret into the report
                 text = re.sub(r"'[^']{4,}'", "'<redacted>'", text)
-            self.add("bandit", r.get("test_id"), path, r.get("line_number"), r.get("issue_severity"),
-                     text, r.get("code") or f"{r.get('test_id')}{path}")
+            try:  # key on the flagged source line itself, so ids survive edits to nearby lines
+                src = open(os.path.join(tree, path), errors="replace").read().splitlines()[r.get("line_number") - 1]
+            except Exception:
+                src = f"{r.get('test_id')}{path}{r.get('line_number')}"
+            self.add("bandit", r.get("test_id"), path, r.get("line_number"), r.get("issue_severity"), text, src)
 
     def shellcheck(self, tree, scripts):
         if not scripts or not self.need("shellcheck"):
@@ -384,11 +387,12 @@ def main():
 
     # The allowlist comes from the commit being pushed, not the working tree.
     with tempfile.TemporaryDirectory(prefix="gl-scan-") as tree:
-        arch = run(["git", "archive", "--format=tar", commit], text=False)
-        if arch.returncode:
-            raise RuntimeError(f"git archive {commit[:9]} failed")
-        if run(["tar", "-x", "-f", "-", "-C", tree], text=False, data=arch.stdout).returncode:
-            raise RuntimeError("could not unpack the commit to scan")
+        # Every tracked file of the commit, through a private index. Not git archive: it drops export-ignore paths.
+        with tempfile.TemporaryDirectory(prefix="gl-idx-") as ix:
+            idx = {"GIT_INDEX_FILE": os.path.join(ix, "index")}
+            if run(["git", "read-tree", commit], extra_env=idx).returncode or \
+                    run(["git", "checkout-index", "-a", "-f", f"--prefix={tree}/"], extra_env=idx).returncode:
+                raise RuntimeError(f"could not check out {commit[:9]} to scan")
         alpath = os.path.join(tree, "security", "accepted-findings")
         alhash = h12(open(alpath).read()) if os.path.exists(alpath) else "none"
 
