@@ -1,0 +1,8 @@
+# security/accepted-findings (DE-49): findings the security scan lets through, until they expire.
+# One per line:  <finding id> | <expires YYYY-MM-DD, at most 180 days out> | <reason, naming the board key that tracks it>
+# Copy finding ids from the scan report (.git/security-scan/latest.md). Expired or malformed entries block the push.
+# path:<tool or *>:<glob> skips one scanner (or all) under a path. Every entry is recorded in the
+# Ghost Labs Security Program, section 6, before it is committed.
+#
+# bandit:B101:tests/test_parse.py:3fa2c1d9e0ab | 2027-01-31 | assert in a unit test only; DE-49
+# path:bandit:tests/** | 2027-04-30 | asserts in unit tests are expected; DE-49

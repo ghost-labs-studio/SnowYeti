@@ -1,5 +1,6 @@
 #!/bin/sh
 # Rejects a commit that breaks the Ghost Labs commit rules (DE-32).
+# shellcheck source=.githooks/rules.sh
 . "$(dirname "$0")/rules.sh"
 out=$(gl_check_message "$(cat "$1")"); ok=$?
 id=$(gl_check_ident "$(git var GIT_AUTHOR_IDENT) / $(git var GIT_COMMITTER_IDENT)") || { out="$out
