@@ -1,0 +1,62 @@
+# Ghost Labs security scan (DE-56, October 30, 2026): the full push scan (.githooks/security-scan.py, DE-49) on every
+# pull request to main and every push to main, so a merge done on GitHub is scanned like a push from the Mac.
+# Branch protection makes the "security-scan" check required on main. Any finding fails the check.
+# Supply chain: the one action is pinned by commit hash, the Python scanners and every package under them by version
+# and SHA-256 (.github/security-scan-tools.lock), gitleaks by SHA-256. Known limits (Security Program section 6):
+# semgrep's rule packs download fresh each run (rules are data, not code), and shellcheck and npm come from GitHub's
+# runner image. A pull request can also change this workflow file itself, which only review of the change catches.
+name: Security scan
+on:
+  pull_request:
+    branches: [main, master, "rc-*", "release/**"]
+  push:
+    branches: [main, master, "rc-*", "release/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the scanners (pinned)
+        run: |
+          set -euo pipefail
+          # Every package by version and SHA-256 (.github/security-scan-tools.lock), in a venv of its own.
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install --quiet --require-hashes --no-deps -r .github/security-scan-tools.lock
+          "$RUNNER_TEMP/tools/bin/python" -m pip check
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz
+          echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          sudo install -m 755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
+          command -v shellcheck npm
+          if git ls-files | grep -q 'Cargo\.lock$'; then cargo install cargo-audit --version 0.22.2 --locked --quiet; fi
+      - name: Full security scan
+        # On a pull request the scanner comes from the target branch, so a change to the scanner can't pass its own
+        # check (the allowlist still comes from the pull request: it is the reviewed exception path). The first pull
+        # request that adds the scanner has none on its target branch, so it uses its own.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          SCAN=.githooks/security-scan.py
+          if [ -n "$BASE_REF" ] && git cat-file -e "origin/$BASE_REF:.githooks/security-scan.py" 2>/dev/null; then
+            git show "origin/$BASE_REF:.githooks/security-scan.py" > "$RUNNER_TEMP/security-scan.py"
+            SCAN="$RUNNER_TEMP/security-scan.py"
+            echo "scanner from $BASE_REF"
+          fi
+          python3 "$SCAN" --rev HEAD --mode full --report "$RUNNER_TEMP/security-scan.md"
+      - name: Report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/security-scan.md" ]; then cat "$RUNNER_TEMP/security-scan.md" >> "$GITHUB_STEP_SUMMARY"; fi

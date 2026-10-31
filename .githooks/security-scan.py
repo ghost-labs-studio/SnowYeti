@@ -14,9 +14,17 @@ Fails closed: a missing scanner, a scanner error, a ruleset that can't download,
 entry all block, the same as a finding. Checks that need a build or a running app (Apple bundle,
 Android manifest, live attack tests) stay in the release gates (standing rules, section 1).
 
+Two modes (DE-56, October 30, 2026). pre-push picks: full for the default branch and tags, quick otherwise.
+  full   everything above (main, tags, the GitHub check, release gates).
+  quick  feature-branch pushes: gitleaks over the new commits only (BASE..REV), semgrep, bandit, shellcheck and
+         the inline-disable check on the files changed since BASE, and each dependency audit only where its
+         lockfile or manifest changed. Allowlist, pin and ignore-file checks always run in full. Any finding blocks.
+
 Usage:
-  security-scan.py [--rev REV] [--report FILE] [--quiet]
+  security-scan.py [--rev REV] [--mode full|quick] [--base BASE] [--report FILE] [--quiet]
     --rev     commit, branch or tag to scan (default HEAD)
+    --mode    full (default) or quick; quick needs --base and falls back to full without a usable one
+    --base    for quick: the commit already scanned (the remote branch tip or the merge-base with main)
     --report  also write the Markdown report here (always written to .git/security-scan/)
 Exit 0 = PASS, 1 = findings or errors (push refused), 2 = usage error.
 
@@ -97,8 +105,9 @@ def git(*args):
 
 
 class Scan:
-    def __init__(self, root, rev):
-        self.root, self.rev = root, rev
+    def __init__(self, root, rev, base=None):
+        self.root, self.rev, self.base = root, rev, base   # base set = quick mode
+        self.tree = None   # the checked-out scan tree, set by main()
         self.findings = []   # dicts: id, tool, severity, path, line, title
         self.errors = []     # strings: anything that stopped a scanner from giving a full answer
         self.ran = []        # (tool, what) pairs
@@ -118,20 +127,35 @@ class Scan:
     def gitleaks(self):
         if not self.need("gitleaks"):
             return
+        m = re.search(r"(\d+)\.(\d+)", git("--version"))
+        if not m or (int(m.group(1)), int(m.group(2))) < (2, 36):
+            self.errors.append(f"git 2.36 or newer is needed to scan merge commits ({git('--version')}); brew install git")
+            return
         with tempfile.TemporaryDirectory() as t:
             rep = os.path.join(t, "g.json")
             rc, out, err = sh(["gitleaks", "git", self.root, "--no-banner", "--redact", "--exit-code", "1",
                                "--ignore-gitleaks-allow", "--gitleaks-ignore-path", t,
-                               f"--log-opts={self.rev}", "--report-format", "json", "--report-path", rep])
-            self.ran.append(("gitleaks", f"history reachable from {self.rev}"))
+                               # --diff-merges=remerge: a merge shows what its author changed beyond git's own merge,
+                               # so a secret added while resolving a merge is seen (git log -p shows merges empty).
+                               f"--log-opts=--diff-merges=remerge {f'{self.base}..{self.rev}' if self.base else self.rev}",
+                               "--report-format", "json", "--report-path", rep])
+            self.ran.append(("gitleaks", f"new commits {self.base[:9]}..{self.rev[:9]}" if self.base
+                             else f"history reachable from {self.rev}"))
             if rc not in (0, 1) or not os.path.exists(rep):
                 self.errors.append(f"gitleaks exit {rc}: {(err or out).strip()[-300:]}")
                 return
             for f in json.load(open(rep)) or []:
+                fp = f.get("File") or ""
+                if fp.startswith("b/") and not os.path.exists(os.path.join(self.tree or "", fp)) \
+                        and os.path.exists(os.path.join(self.tree or "", fp[2:])):
+                    f["File"] = fp[2:]   # gitleaks misreads remerge's CONFLICT header and keeps the diff's b/ prefix
                 self.add("gitleaks", f.get("RuleID"), f.get("File"), f.get("StartLine"), "SECRET",
                          f"{f.get('Description')} in commit {str(f.get('Commit'))[:9]}", f.get("Fingerprint"))
 
-    def semgrep(self, tree, exts):
+    def semgrep(self, tree, exts, files=None):
+        if files is not None and not files:
+            self.ran.append(("semgrep", "no changed files"))
+            return
         if not self.need("semgrep"):
             return
         packs = ["p/default", "p/secrets"] + sorted({SEMGREP_PACKS[e] for e in exts if e in SEMGREP_PACKS})
@@ -144,8 +168,9 @@ class Scan:
             return
         for d in SKIP_DIRS:
             cmd += ["--exclude", d]
-        rc, out, err = sh(cmd + [tree], timeout=3600)
-        self.ran.append(("semgrep", " ".join(packs)))
+        targets = [tree] if files is None else [os.path.join(tree, f) for f in files]
+        rc, out, err = sh(cmd + targets, timeout=3600)
+        self.ran.append(("semgrep", " ".join(packs) + ("" if files is None else f" on {len(files)} changed file(s)")))
         try:
             d = json.loads(out)
         except Exception:
@@ -167,11 +192,14 @@ class Scan:
             cid = str(r.get("check_id")).split("ghost-labs-security.semgrep.", 1)[-1]  # drop the cache-path prefix
             self.add("semgrep", cid, path, line, ex.get("severity", "?"), ex.get("message"), text)
 
-    def bandit(self, tree):
+    def bandit(self, tree, files=None):
+        if files is not None and not files:
+            return
         if not self.need("bandit"):
             return
-        rc, out, err = sh(["bandit", "-r", tree, "-f", "json", "-q", "--ignore-nosec", "-x", ",".join(f"*/{d}/*" for d in SKIP_DIRS)])
-        self.ran.append(("bandit", "all Python, every severity"))
+        targets = ["-r", tree] if files is None else [os.path.join(tree, f) for f in files]
+        rc, out, err = sh(["bandit", *targets, "-f", "json", "-q", "--ignore-nosec", "-x", ",".join(f"*/{d}/*" for d in SKIP_DIRS)])
+        self.ran.append(("bandit", "all Python, every severity" if files is None else f"{len(files)} changed Python file(s), every severity"))
         try:
             d = json.loads(out)
         except Exception:
@@ -195,14 +223,14 @@ class Scan:
             return
         for i in range(0, len(scripts), 200):
             chunk = scripts[i:i + 200]
-            rc, out, err = sh(["shellcheck", "-f", "json1", "-x", *chunk], cwd=tree)
+            rc, out, err = sh(["shellcheck", "-f", "json1", "-x", *[os.path.join(".", c) for c in chunk]], cwd=tree)
             try:
                 d = json.loads(out)
             except Exception:
                 self.errors.append(f"shellcheck exit {rc}: {err.strip()[-300:]}")
                 continue
             for c in d.get("comments", []):
-                path = c["file"]
+                path = os.path.normpath(c["file"])
                 try:
                     text = open(os.path.join(tree, path), errors="replace").read().splitlines()[c["line"] - 1]
                 except Exception:
@@ -327,6 +355,70 @@ def inventory(tree):
     return exts, sorted(scripts), sorted(reqs), sorted(projects), sorted(npm), sorted(cargo)
 
 
+MAX_PIN_DAYS = 30
+PIN_WARN_DAYS = 7
+
+
+def check_pins(tree, commit, today):
+    """Pinned downloads (DE-55). security/pins lists the files that name third-party code a build downloads and runs:
+        <pin file path> | <max days, at most 30> | <what it pins, naming its board key>
+    Each pin file, exactly as committed, needs a passing review: security/PIN-<name>-<YYYY-MM-DD>.md with the lines
+        Pin-File: <path>   Pin-Blob: <git blob hash of that file>   Date: <YYYY-MM-DD>   Result: PASS
+    A pin file changed without such a review blocks. So does a review older than its max days: an old pin is as
+    dangerous as an unchecked one, so it must be refreshed (or reviewed again) to push. Returns (problems, notes)."""
+    problems, notes = [], []
+    manifest = os.path.join(tree, "security", "pins")
+    if not os.path.exists(manifest):
+        return problems, notes
+    reports = []
+    secdir = os.path.join(tree, "security")
+    for name in sorted(os.listdir(secdir)):
+        if not (name.startswith("PIN-") and name.endswith(".md")):
+            continue
+        fields = {}
+        for line in open(os.path.join(secdir, name), encoding="utf-8", errors="replace"):
+            m = re.match(r"^(Pin-File|Pin-Blob|Date|Result):\s*(\S+)", line)
+            if m and m.group(1) not in fields:
+                fields[m.group(1)] = m.group(2)
+        reports.append((name, fields))
+    for n, raw in enumerate(open(manifest, encoding="utf-8"), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [x.strip() for x in line.split("|")]
+        where = f"security/pins line {n}"
+        if len(parts) != 3 or not parts[1].isdigit() or not re.search(r"[A-Z][A-Z0-9]{0,4}-[0-9]+", parts[2]):
+            problems.append(f"{where}: needs '<pin file> | <max days, 30 or less> | <what, with its board key>'")
+            continue
+        path, max_days = parts[0], min(int(parts[1]), MAX_PIN_DAYS)
+        got = run(["git", "rev-parse", f"{commit}:{path}"])
+        if got.returncode:
+            problems.append(f"{where}: {path} is not in this commit")
+            continue
+        blob = got.stdout.strip()
+        dated = []
+        for name, f in reports:
+            if f.get("Pin-File") == path and f.get("Pin-Blob") == blob and f.get("Result") == "PASS":
+                try:
+                    dated.append((datetime.date.fromisoformat(f.get("Date", "")), name))
+                except ValueError:
+                    problems.append(f"security/{name}: Date is not YYYY-MM-DD")
+        if not dated:
+            problems.append(f"pinned download {path} (blob {blob[:12]}) has no passing review: refresh it and write "
+                            f"security/PIN-<name>-<date>.md with Pin-File: {path}, Pin-Blob: {blob}, Date and Result: PASS")
+            continue
+        when, name = max(dated)
+        age = (today - when).days
+        if age > max_days:
+            problems.append(f"pinned download {path}: its review ({name}, {when}) is {age} days old, past {max_days}; "
+                            f"refresh the pin to the current upstream release, or review it again")
+        elif age > max_days - PIN_WARN_DAYS:
+            notes.append(f"pinned download {path}: review {when} expires in {max_days - age} days; refresh it soon")
+        else:
+            notes.append(f"pinned download {path}: reviewed {when} ({name}), {max_days - age} days left")
+    return problems, notes
+
+
 def load_allowlist(path, today):
     entries, problems = [], []
     if not os.path.exists(path):
@@ -355,6 +447,13 @@ def load_allowlist(path, today):
         if not re.search(r"[A-Z][A-Z0-9]{0,4}-[0-9]+", reason):
             problems.append(f"{where}: the reason must name the board key that tracks it (e.g. DE-49)")
             continue
+        if fid.startswith("path:"):
+            bits = fid.split(":", 2)
+            # A path entry must start at a named folder or file: '*', '**/x' or '?' first would switch off a scanner
+            # for the whole repo (DE-56 review).
+            if len(bits) != 3 or not bits[2] or bits[2][0] in "*?[" or bits[1] == "*" and "/" not in bits[2]:
+                problems.append(f"{where}: path entries must name a folder (path:<tool>:<folder>/<glob>), not match the whole repo")
+                continue
         entries.append(dict(id=fid, expires=exp, reason=reason, line=n))
     return entries, problems
 
@@ -375,6 +474,8 @@ def main():
     ap.add_argument("--rev", default="HEAD")
     ap.add_argument("--report")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--mode", choices=("full", "quick"), default="full")
+    ap.add_argument("--base")
     a = ap.parse_args()
     root = git("rev-parse", "--show-toplevel")
     os.chdir(root)
@@ -382,6 +483,19 @@ def main():
     commit = git("rev-parse", f"{a.rev}^{{commit}}")
     tree_id = git("rev-parse", f"{a.rev}^{{tree}}")
     today = datetime.date.today()
+    # Quick mode scans what is new since a base that was already scanned. No usable base means the full scan.
+    base, mode_note = None, "full scan"
+    if a.mode == "quick":
+        mb = ""
+        if a.base and not re.fullmatch(r"0+", a.base):
+            rc, out, _ = sh(["git", "merge-base", a.base, commit])
+            mb = out.strip() if rc == 0 else ""
+        if mb and mb != commit:
+            base = mb
+        elif mb == commit:
+            base = commit   # nothing new: only the always-on checks
+        else:
+            mode_note = f"full scan (quick asked, but no usable base{' ' + a.base[:9] if a.base else ''})"
     outdir = os.path.join(os.path.abspath(gitdir), "security-scan")
     os.makedirs(outdir, exist_ok=True)
 
@@ -395,25 +509,57 @@ def main():
                 raise RuntimeError(f"could not check out {commit[:9]} to scan")
         alpath = os.path.join(tree, "security", "accepted-findings")
         alhash = h12(open(alpath).read()) if os.path.exists(alpath) else "none"
+        changed = None   # None = whole tree (full); a set of paths = quick
+        if base:
+            rc, out, err = sh(["git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRT", "-z", base, commit])
+            if rc:
+                raise RuntimeError(f"git diff {base[:9]}..{commit[:9]}: {err.strip()}")
+            changed = {p for p in out.split("\0") if p and os.path.isfile(os.path.join(tree, p))
+                       and not any(part in SKIP_DIRS for part in p.split("/")[:-1])}
+            mode_note = f"quick scan: {len(changed)} changed file(s) since {base[:9]}"
 
         cache = os.path.join(outdir, "pass-cache.json")
         try:
             c = json.load(open(cache))
-            if c.get("tree") == tree_id and c.get("allow") == alhash and c.get("day") == str(today) \
+            # Keyed on the commit, not the tree: the same tree can sit on top of a history that added and removed a
+            # secret. A full pass covers a later scan of the same commit; a quick pass only the same commit and base.
+            mode_ok = c.get("commit") == commit and (c.get("mode") == "full" or (base and c.get("base") == base))
+            if mode_ok and c.get("tree") == tree_id and c.get("allow") == alhash and c.get("day") == str(today) \
                     and time.time() - c.get("at", 0) < CACHE_HOURS * 3600 and c.get("max_exp_ok", "") >= str(today):
                 if not a.quiet:
-                    print(f"security-scan: PASS (same tree {tree_id[:9]} passed at {time.strftime('%H:%M', time.localtime(c['at']))})", file=sys.stderr)
+                    print(f"security-scan: PASS (same commit {commit[:9]} passed at {time.strftime('%H:%M', time.localtime(c['at']))})", file=sys.stderr)
                 return 0
         except (OSError, ValueError, KeyError, TypeError):
             print("security-scan: no usable pass cache, running the full scan", file=sys.stderr) if not a.quiet else None
 
-        s = Scan(root, commit)
+        s = Scan(root, commit, base if changed is not None else None)
+        s.tree = tree
         exts, scripts, reqs, projects, npm, cargo = inventory(tree)
+        files = py = None
+        if changed is not None:
+            def touched(dir_, names):   # a dependency audit runs when its lockfile or a manifest beside it changed
+                return any(os.path.normpath(os.path.join(dir_, n)) in changed for n in names)
+            files = sorted(changed)
+            py = [f for f in files if f.endswith(".py")]
+            exts = {os.path.splitext(f)[1].lower() for f in files}
+            scripts = [p for p in scripts if p in changed]
+            reqs = [r for r in reqs if r in changed]
+            projects = [d for d in projects if touched(d, ["pyproject.toml", "uv.lock", "poetry.lock"])]
+            npm = [l for l in npm if touched(os.path.dirname(l), ["package-lock.json", "package.json"])]
+            cargo = [l for l in cargo if l in changed or any(f.endswith("Cargo.toml") and f.startswith(os.path.dirname(l)) for f in files)]
+            s.ran.append(("mode", mode_note))
         entries, problems = load_allowlist(alpath, today)
-        print(f"security-scan: scanning {commit[:9]} (full scan, this takes a few minutes)...", file=sys.stderr)
-        for step in (s.gitleaks, lambda: s.semgrep(tree, exts), lambda: s.bandit(tree) if ".py" in exts else None,
+        pin_problems, pin_notes = check_pins(tree, commit, today)
+        problems += pin_problems
+        if os.path.exists(os.path.join(tree, "security", "pins")):
+            s.ran.append(("pinned downloads", "; ".join(pin_notes) or "checked"))
+        print(f"security-scan: scanning {commit[:9]} ({mode_note}{', this takes a few minutes' if changed is None else ''})...", file=sys.stderr)
+        steps = (s.gitleaks, lambda: s.semgrep(tree, exts, files), lambda: s.bandit(tree, py) if ".py" in exts else None,
                      lambda: s.shellcheck(tree, scripts), lambda: suppressions(s, tree, scripts), lambda: s.pip_audit(tree, reqs, projects),
-                     lambda: s.npm_audit(tree, npm), lambda: s.cargo_audit(tree, cargo)):
+                     lambda: s.npm_audit(tree, npm), lambda: s.cargo_audit(tree, cargo))
+        if base == commit:   # nothing new since the base: the always-on checks only
+            steps = (lambda: suppressions(s, tree, []),)
+        for step in steps:
             try:
                 step()
             except subprocess.TimeoutExpired as e:
@@ -426,19 +572,19 @@ def main():
         e = allowed(f, entries)
         (accepted if e else blocking).append((f, e))
     used = {e["line"] for _, e in accepted}
-    unused = [e for e in entries if e["line"] not in used]
+    unused = [e for e in entries if e["line"] not in used] if changed is None else []   # only a full scan can tell
     ok = not blocking and not s.errors and not problems
     result = "PASS" if ok else "FAIL"
 
     lines = [f"# Security scan: {os.path.basename(root)} {commit[:9]}", "",
-             f"Result: {result}", f"Commit: {commit}", f"Tree: {tree_id}", f"Date: {time.strftime('%Y-%m-%d %H:%M %Z')}",
+             f"Result: {result}", f"Mode: {mode_note}", f"Commit: {commit}", f"Tree: {tree_id}", f"Date: {time.strftime('%Y-%m-%d %H:%M %Z')}",
              f"Blocking findings: {len(blocking)}", f"Accepted (allowlisted): {len(accepted)}",
-             f"Scanner errors: {len(s.errors)}", f"Allowlist problems: {len(problems)}", "", "## What ran", ""]
+             f"Scanner errors: {len(s.errors)}", f"Allowlist and pin problems: {len(problems)}", "", "## What ran", ""]
     lines += [f"- {t}: {w}" for t, w in s.ran] or ["- nothing ran"]
     if s.errors:
         lines += ["", "## Scanner errors (each blocks)", ""] + [f"- {e}" for e in s.errors]
     if problems:
-        lines += ["", "## Allowlist problems (each blocks)", ""] + [f"- {p}" for p in problems]
+        lines += ["", "## Allowlist and pin problems (each blocks)", ""] + [f"- {p}" for p in problems]
     if blocking:
         lines += ["", "## Blocking findings", "", "Fix each one, or add its id to security/accepted-findings with an expiry and the board key.", ""]
         for f, _ in sorted(blocking, key=lambda x: (x[0]["tool"], x[0]["path"] or "", x[0]["line"] or 0)):
@@ -461,13 +607,17 @@ def main():
 
     if ok:
         exp = min([e["expires"] for e in entries] or ["9999-12-31"])
-        json.dump(dict(tree=tree_id, allow=alhash, day=str(today), at=time.time(), max_exp_ok=exp), open(cache, "w"))
-        print(f"security-scan: PASS ({len(accepted)} accepted, {', '.join(t for t, _ in s.ran)})", file=sys.stderr)
+        json.dump(dict(tree=tree_id, allow=alhash, day=str(today), at=time.time(), max_exp_ok=exp,
+                       mode="quick" if changed is not None else "full", base=base, commit=commit), open(cache, "w"))
+        print(f"security-scan: PASS, {mode_note} ({len(accepted)} accepted, {', '.join(t for t, _ in s.ran if t != 'mode')})", file=sys.stderr)
+        for t, w in s.ran:
+            if t == "pinned downloads" and "expires in" in w:
+                print(f"  note: {w}", file=sys.stderr)
         return 0
     if os.path.exists(cache):
         os.remove(cache)
     print(f"security-scan: FAIL. Push refused: {len(blocking)} finding(s), {len(s.errors)} scanner error(s), "
-          f"{len(problems)} allowlist problem(s).", file=sys.stderr)
+          f"{len(problems)} allowlist or pin problem(s).", file=sys.stderr)
     for f, _ in blocking[:15]:
         print(f"  [{f['severity']}] {f['path']}:{f['line'] or ''} {f['title'][:100]}", file=sys.stderr)
     for e in (s.errors + problems)[:10]:

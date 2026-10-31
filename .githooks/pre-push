@@ -1,26 +1,53 @@
 #!/bin/sh
-# Ghost Labs pre-push (DE-38, DE-49). Never bypass with --no-verify.
+# Ghost Labs pre-push (DE-38, DE-49, DE-56). Never bypass with --no-verify.
 # 1. One item, one branch: refuses a second unmerged claude/ branch for the same board key (DE-38).
 # 2. Release tags need a passing scan report and a passing panel review for that version (DE-49).
-# 3. Security scan: the full static scan of every commit being pushed; any finding blocks (DE-49).
+# 3. Security scan, any finding blocks (DE-49). Which scan (DE-56, October 30, 2026):
+#    full  pushes to the default branch, main, master, rc-* and release/* branches, and every tag;
+#    quick other branches: new commits for secrets, changed files for code, audits only where a lockfile changed.
+#    A quick push with no usable base (a new branch with nothing in common with the default branch), or a push
+#    to a URL rather than a named remote, runs full.
 dir=$(dirname "$0")
 # Homebrew and cargo tools, also when git runs from an app (VS Code) with a short PATH.
 PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"; export PATH
-shas=""
-while read -r _ local_sha remote_ref _; do
+remote=${1:-origin}
+named=1; git remote get-url "$remote" >/dev/null 2>&1 || named=0   # a push to a URL: no remote refs to go by
+default=$(git symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null); default=${default#"$remote"/}
+[ -n "$default" ] || default=main
+jobs=""
+while read -r _ local_sha remote_ref remote_sha; do
   case "$local_sha" in *[!0]*) ;; *) continue ;; esac   # a deletion
   case "$remote_ref" in
-    refs/heads/claude/*) sh "$dir/check-duplicate-branch.sh" "$remote_ref" || exit 1 ;;
+    refs/heads/claude/*) sh "$dir/check-duplicate-branch.sh" "$remote_ref" </dev/null || exit 1 ;;
     refs/tags/*)
       tag=${remote_ref#refs/tags/}
       ver=$(printf '%s\n' "$tag" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
       if [ -n "$ver" ]; then
-        sh "$dir/check-release-evidence.sh" "*" "$ver" "$local_sha" || { echo "pre-push: tag $tag refused (DE-49)." >&2; exit 1; }
+        sh "$dir/check-release-evidence.sh" "*" "$ver" "$local_sha" </dev/null || { echo "pre-push: tag $tag refused (DE-49)." >&2; exit 1; }
       fi ;;
   esac
-  case " $shas " in *" $local_sha "*) ;; *) shas="$shas $local_sha" ;; esac
+  mode=quick; base=""
+  case "$remote_ref" in
+    refs/tags/*|refs/heads/main|refs/heads/master|refs/heads/rc-*|refs/heads/release/*|"refs/heads/$default") mode=full ;;
+  esac
+  [ "$named" = 1 ] || mode=full
+  if [ "$mode" = quick ]; then
+    # The base is what the remote already has (normally scanned when it was pushed from a Mac with this hook; a push
+    # from elsewhere wasn't, but it is already exposed and the full scan on main and in CI covers it), else where the
+    # branch left the default branch.
+    case "$remote_sha" in *[!0]*) git cat-file -e "$remote_sha^{commit}" 2>/dev/null && base=$remote_sha ;; esac
+    [ -n "$base" ] || base=$(git merge-base "$local_sha" "refs/remotes/$remote/$default" 2>/dev/null)
+    [ -n "$base" ] || mode=full
+  fi
+  job="$local_sha:$mode:$base"
+  case " $jobs " in *" $job "*) ;; *) jobs="$jobs $job" ;; esac
 done
-for s in $shas; do
-  python3 "$dir/security-scan.py" --rev "$s" || exit 1
+for j in $jobs; do
+  sha=${j%%:*}; rest=${j#*:}; mode=${rest%%:*}; base=${rest#*:}
+  if [ "$mode" = quick ]; then
+    python3 "$dir/security-scan.py" --rev "$sha" --mode quick --base "$base" || exit 1
+  else
+    python3 "$dir/security-scan.py" --rev "$sha" || exit 1
+  fi
 done
 exit 0
