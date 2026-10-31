@@ -3,3 +3,8 @@
 # one call site, fixed argument lists, no shell, tools resolved to full paths. Renew only after a fresh review.
 bandit:B404:.githooks/security-scan.py:a294bde6af9c | 2027-04-28 | the scan hook imports subprocess to run the scanners; reviewed DE-49
 bandit:B603:.githooks/security-scan.py:7a7ff702e55a | 2027-04-28 | the scan hook's one subprocess call, fixed args, no shell; reviewed DE-49
+
+panel:DE-59:pass6-R1-1 | 2027-01-29 | release gate review DE-59 pass 6 R1-1, accepted by Larry October 31, 2026: a multi-line inline link title can hide a decision line from the rendered view; hardening (closed grammar) follows DE-59
+panel:DE-59:pass6-R1-2 | 2027-01-29 | release gate review DE-59 pass 6 R1-2, accepted by Larry October 31, 2026: multi-line GFM strikethrough can strike a decision line in the rendered view; hardening follows DE-59
+panel:DE-59:pass6-R2-1 | 2027-01-29 | release gate review DE-59 pass 6 R2-1, accepted by Larry October 31, 2026: a lone dash under a quoted header line renders as a heading the gate does not read; hardening follows DE-59
+panel:DE-59:pass6-R2-2 | 2027-01-29 | release gate review DE-59 pass 6 R2-2, accepted by Larry October 31, 2026: a numbered list item in the header can render a heading or verdict the gate does not read; hardening follows DE-59
