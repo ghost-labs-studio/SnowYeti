@@ -34,9 +34,9 @@ for f in $panel; do
   printf '%s\n' "$body" | grep -q "^Version: $ver\$" || { echo "  - $f has no line 'Version: $ver'" >&2; fail=1; }
   r=$(printf '%s\n' "$body" | grep -c '^## Reviewer ')
   p=$(printf '%s\n' "$body" | grep -c '^Verdict: PASS')
-  [ "$r" -ge 3 ] && [ "$p" -ge 3 ] || { echo "  - $f needs 3 reviewers, each 'Verdict: PASS' (has $r reviewers, $p passes)" >&2; fail=1; }
+  if [ "$r" -lt 3 ] || [ "$p" -lt 3 ]; then echo "  - $f needs 3 reviewers, each 'Verdict: PASS' (has $r reviewers, $p passes)" >&2; fail=1; fi
   printf '%s\n' "$body" | grep -q '^Verdict: FAIL' && { echo "  - $f has a reviewer with Verdict: FAIL" >&2; fail=1; }
 done
-[ $fail = 0 ] && echo "check-release-evidence: $plat $ver has a passing scan and panel review." >&2 \
-  || echo "check-release-evidence: $plat $ver is not cleared for release (DE-49)." >&2
+if [ "$fail" = 0 ]; then echo "check-release-evidence: $plat $ver has a passing scan and panel review." >&2
+else echo "check-release-evidence: $plat $ver is not cleared for release (DE-49)." >&2; fi
 exit $fail

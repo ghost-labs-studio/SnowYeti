@@ -12,5 +12,6 @@ for c in $(git rev-list "$base..$branch"); do
   n=$((n+1))
   out=$(gl_check_message "$(git log -1 --format=%B "$c")"; m=$?; gl_check_ident "$(git log -1 --format="%an <%ae> / %cn <%ce>" "$c")"; exit $((m | $?))) || { git log -1 --format='%h %s' "$c"; echo "$out"; fail=1; }
 done
-[ $fail = 0 ] && echo "check-branch: $n commit(s) on $branch pass the Ghost Labs rules." || echo "check-branch: $branch breaks the Ghost Labs rules. Reword the commits (git rebase) before bringing it back." >&2
+if [ "$fail" = 0 ]; then echo "check-branch: $n commit(s) on $branch pass the Ghost Labs rules."
+else echo "check-branch: $branch breaks the Ghost Labs rules. Reword the commits (git rebase) before bringing it back." >&2; fi
 exit $fail
