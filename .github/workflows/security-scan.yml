@@ -2,9 +2,9 @@
 # pull request to main and every push to main, so a merge done on GitHub is scanned like a push from the Mac.
 # Branch protection makes the "security-scan" check required on main. Any finding fails the check.
 # Supply chain: the one action is pinned by commit hash, the Python scanners and every package under them by version
-# and SHA-256 (.github/security-scan-tools.lock), gitleaks by SHA-256. Known limits (Security Program section 6):
-# semgrep's rule packs download fresh each run (rules are data, not code), and shellcheck and npm come from GitHub's
-# runner image. A pull request can also change this workflow file itself, which only review of the change catches.
+# and SHA-256 (.github/security-scan-tools.lock), gitleaks and shellcheck 0.11.0 by SHA-256. Known limits (Security Program section 6):
+# semgrep's rule packs download fresh each run (rules are data, not code), and npm comes from GitHub's runner image.
+# shellcheck is pinned so GitHub and the Mac run the same version (DE-56, October 31, 2026). A pull request can also change this workflow file itself, which only review of the change catches.
 name: Security scan
 on:
   pull_request:
@@ -39,6 +39,12 @@ jobs:
           echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
           sudo install -m 755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
+          curl -sSfL -o "$RUNNER_TEMP/shellcheck.tar.xz" https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP" shellcheck-v0.11.0/shellcheck
+          sudo install -m 755 "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
+          test "$(command -v shellcheck)" = /usr/local/bin/shellcheck
+          shellcheck --version | grep -qx "version: 0.11.0"
           command -v shellcheck npm
           if git ls-files | grep -q 'Cargo\.lock$'; then cargo install cargo-audit --version 0.22.2 --locked --quiet; fi
       - name: Full security scan
