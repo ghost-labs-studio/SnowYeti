@@ -70,6 +70,21 @@ RULE_CACHE = os.path.expanduser("~/.cache/ghost-labs-security/semgrep")
 RULES_FRESH_H, RULES_MAX_DAYS = 24, 7
 
 
+def is_rules(body):
+    """A Semgrep rule pack as the registry sends it: YAML starting "rules:", or (since late October 2026) JSON with a
+    non-empty "rules" list after a YAML "---" line; semgrep reads both. Anything else (an HTML page, an error) isn't."""
+    text = body.lstrip()
+    if text.startswith(b"---"):
+        text = text[3:].lstrip()
+    if text.startswith(b"rules:"):
+        return True
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(d, dict) and isinstance(d.get("rules"), list) and len(d["rules"]) > 0
+
+
 def rule_pack(pack, errors):
     """A local copy of a Semgrep registry pack: refreshed daily, used up to 7 days old if the registry can't be
     reached, so a registry outage doesn't stop pushes but stale rules do. Returns the file, or None (an error)."""
@@ -82,7 +97,7 @@ def rule_pack(pack, errors):
             if got.returncode:
                 raise RuntimeError(f"curl exit {got.returncode}")
             body = got.stdout
-            if not body.lstrip().startswith(b"rules:"):
+            if not is_rules(body):
                 raise ValueError("not a rules file")
             with open(f + ".tmp", "wb") as fh:
                 fh.write(body)
