@@ -1,4 +1,4 @@
-# Ghost Labs security scan (DE-56, October 30, 2026): the full push scan (.githooks/security-scan.py, DE-49) on every
+# Ghost Labs security scan (DE-56, October 30, 2026; DE-98 threat feed helper, November 3, 2026): the full push scan (.githooks/security-scan.py, DE-49) on every
 # pull request to main and every push to main, so a merge done on GitHub is scanned like a push from the Mac.
 # Branch protection makes the "security-scan" check required on main. Any finding fails the check.
 # Supply chain: the one action is pinned by commit hash, the Python scanners and every package under them by version
@@ -57,8 +57,17 @@ jobs:
           set -euo pipefail
           SCAN=.githooks/security-scan.py
           if [ -n "$BASE_REF" ] && git cat-file -e "origin/$BASE_REF:.githooks/security-scan.py" 2>/dev/null; then
-            git show "origin/$BASE_REF:.githooks/security-scan.py" > "$RUNNER_TEMP/security-scan.py"
-            SCAN="$RUNNER_TEMP/security-scan.py"
+            # The scanner and every helper it loads come from the target branch, never the pull request (DE-98:
+            # security-scan.py loads threat-feed.py from its own folder).
+            # The whole .githooks folder of the target branch, so no helper list needs keeping (DE-98 pass 2).
+            mkdir -p "$RUNNER_TEMP/base"
+            git archive "origin/$BASE_REF" .githooks | tar -x -C "$RUNNER_TEMP/base"
+            # Captured first, so no early-exiting reader can make find fail under pipefail (pass 3 R2-4).
+            found=$(find "$RUNNER_TEMP/base/.githooks" \( -name '*.pyc' -o -name '*.pyo' -o -name __pycache__ \) -print)
+            if [ -n "$found" ]; then
+              echo "compiled Python in the target branch's .githooks; refusing" >&2; exit 1
+            fi
+            SCAN="$RUNNER_TEMP/base/.githooks/security-scan.py"
             echo "scanner from $BASE_REF"
           fi
           python3 "$SCAN" --rev HEAD --mode full --report "$RUNNER_TEMP/security-scan.md"

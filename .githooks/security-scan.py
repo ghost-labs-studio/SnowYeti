@@ -8,7 +8,8 @@ the push on ANY finding, unless the finding is listed, unexpired, in security/ac
   Code          semgrep (p/default, p/secrets and a pack per language found), bandit for Python,
                 shellcheck for sh/bash scripts
   Dependencies  pip-audit (requirements*.txt, pyproject.toml), npm audit (package-lock.json),
-                cargo audit (Cargo.lock)
+                cargo audit (Cargo.lock), and the threat feed (DE-98): every pinned package in every lockfile
+                against OSV, with CISA KEV matches as Critical (threat-feed.py; fails closed when unreachable)
 
 Fails closed: a missing scanner, a scanner error, a ruleset that can't download, or a bad allowlist
 entry all block, the same as a finding. Checks that need a build or a running app (Apple bundle,
@@ -295,6 +296,44 @@ class Scan:
                                  f"{name}: {via.get('title')}", f"{name}{via.get('range')}")
             self.ran.append(("npm audit", lock))
 
+    def threat_feed(self, tree, changed=None):
+        """OSV + CISA KEV over every lockfile (DE-98): threat-feed.py beside this script. changed: the quick scan's
+        changed files (a lockfile, or a manifest beside one, changed), or None for every lockfile."""
+        import importlib.util
+        # Source only: no bytecode is written, and none is read, because the cache prefix is an empty folder of
+        # this run's own, so a planted __pycache__ file can't run in place of the reviewed source (DE-98 pass 2).
+        sys.dont_write_bytecode = True
+        sys.pycache_prefix = tempfile.mkdtemp(prefix="gl-nopyc-")
+        spec = importlib.util.spec_from_file_location("gl_threat_feed", os.path.join(os.path.dirname(os.path.abspath(__file__)), "threat-feed.py"))
+        if spec is None or not os.path.exists(spec.origin):
+            self.errors.append("threat feed: .githooks/threat-feed.py is missing")
+            return
+        tf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tf)
+        only = None
+        if changed is not None:
+            manifests = {"package.json", "Cargo.toml", "pyproject.toml", "Package.swift", "Gemfile", "composer.json",
+                         "Pipfile", "build.gradle", "build.gradle.kts", "Podfile", "go.mod"}
+            only = {f for f in changed if tf.is_lockfile(os.path.basename(f), f)}   # the path too (pass 3 R1-4)
+            dirs = {os.path.dirname(f) for f in changed if os.path.basename(f) in manifests}
+            if dirs:
+                cov, unc, _ = tf.lockfiles(tree)
+                only |= {p for p in [c[0] for c in cov] + unc if os.path.dirname(p) in dirs}
+            if not only:
+                return
+        matches, uncovered, notes, errors, feed_version = tf.check(tree, only=only)
+        self.errors.extend(errors)
+        for u in uncovered:   # a lockfile it can't read is a finding: fix it with a reader or accept it (pass 1 R2-5)
+            self.add("threat-feed", "not-covered", u, None, "Medium",
+                     f"{u}: no threat feed reader for this lockfile; its packages are NOT checked", u)
+        for m in matches:
+            self.add("threat-feed", m["id"], m["lockfile"], None, m["severity"],
+                     f"{m['name']} {m['version']}: {m['summary'] or ', '.join(m['aliases'])}", f"{m['ecosystem']}{m['name']}{m['version']}")
+        for n in notes:
+            self.ran.append(("threat feed", n))
+        if feed_version:
+            self.ran.append(("threat feed version", feed_version))
+
     def cargo_audit(self, tree, locks):
         if not locks:
             return
@@ -564,6 +603,15 @@ def main():
             cargo = [l for l in cargo if l in changed or any(f.endswith("Cargo.toml") and f.startswith(os.path.dirname(l)) for f in files)]
             s.ran.append(("mode", mode_note))
         entries, problems = load_allowlist(alpath, today)
+        # Compiled Python in the repo can run in place of reviewed source and can't be reviewed: never allowed
+        # (DE-98 pass 2). Checked on the commit's own file list, every scan.
+        rc, out, err = sh(["git", "ls-tree", "-r", "-z", "--name-only", commit])
+        if rc:
+            problems.append(f"can't list the files of {commit[:9]}: {err.strip()[:200]}")
+        else:
+            for f in out.split("\0"):
+                if f and (f.endswith((".pyc", ".pyo")) or "__pycache__/" in f or f.startswith("__pycache__")):
+                    problems.append(f"compiled Python is committed: {f} (remove it; never allowed, DE-98)")
         pin_problems, pin_notes = check_pins(tree, commit, today)
         problems += pin_problems
         if os.path.exists(os.path.join(tree, "security", "pins")):
@@ -571,7 +619,8 @@ def main():
         print(f"security-scan: scanning {commit[:9]} ({mode_note}{', this takes a few minutes' if changed is None else ''})...", file=sys.stderr)
         steps = (s.gitleaks, lambda: s.semgrep(tree, exts, files), lambda: s.bandit(tree, py) if ".py" in exts else None,
                      lambda: s.shellcheck(tree, scripts), lambda: suppressions(s, tree, scripts), lambda: s.pip_audit(tree, reqs, projects),
-                     lambda: s.npm_audit(tree, npm), lambda: s.cargo_audit(tree, cargo))
+                     lambda: s.npm_audit(tree, npm), lambda: s.cargo_audit(tree, cargo),
+                     lambda: s.threat_feed(tree, changed))
         if base == commit:   # nothing new since the base: the always-on checks only
             steps = (lambda: suppressions(s, tree, []),)
         for step in steps:
@@ -633,8 +682,9 @@ def main():
         os.remove(cache)
     print(f"security-scan: FAIL. Push refused: {len(blocking)} finding(s), {len(s.errors)} scanner error(s), "
           f"{len(problems)} allowlist or pin problem(s).", file=sys.stderr)
-    for f, _ in blocking[:15]:
+    for f, _ in blocking[:40]:   # with the id, so a CI log alone is enough to fix or accept it (DE-101)
         print(f"  [{f['severity']}] {f['path']}:{f['line'] or ''} {f['title'][:100]}", file=sys.stderr)
+        print(f"      id: {f['id']}", file=sys.stderr)
     for e in (s.errors + problems)[:10]:
         print(f"  ! {e}", file=sys.stderr)
     print(f"  Full report: {os.path.join(outdir, 'latest.md')}", file=sys.stderr)

@@ -1,7 +1,8 @@
 #!/bin/sh
-# Ghost Labs pre-push (DE-38, DE-49, DE-56). Never bypass with --no-verify.
+# Ghost Labs pre-push (DE-38, DE-49, DE-56, DE-98). Never bypass with --no-verify.
 # 1. One item, one branch: refuses a second unmerged claude/ branch for the same board key (DE-38).
-# 2. Release tags need a passing scan report and a passing panel review for that version (DE-49).
+# 2. Release tags need a passing scan report and a passing panel review for that version (DE-49), and an SBOM
+#    that matches the tagged commit's lockfiles (DE-98).
 # 3. Security scan, any finding blocks (DE-49). Which scan (DE-56, October 30, 2026):
 #    full  pushes to the default branch, main, master, rc-* and release/* branches, and every tag;
 #    quick other branches: new commits for secrets, changed files for code, audits only where a lockfile changed.
@@ -24,6 +25,7 @@ while read -r _ local_sha remote_ref remote_sha; do
       ver=$(printf '%s\n' "$tag" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
       if [ -n "$ver" ]; then
         sh "$dir/check-release-evidence.sh" "*" "$ver" "$local_sha" </dev/null || { echo "pre-push: tag $tag refused (DE-49)." >&2; exit 1; }
+        python3 "$dir/sbom.py" check "*" "$ver" --rev "$local_sha" </dev/null || { echo "pre-push: tag $tag refused: no matching SBOM (DE-98)." >&2; exit 1; }
       fi ;;
   esac
   mode=quick; base=""

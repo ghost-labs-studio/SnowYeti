@@ -1,0 +1,5 @@
+
+# compiled Python is never committed; the hooks load their helpers from source only (DE-98)
+__pycache__/
+*.pyc
+*.pyo
