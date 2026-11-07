@@ -28,7 +28,7 @@ top=$(git rev-parse --show-toplevel) || exit 1
 set -f
 files() {  # every file directly under security/ or docs/security/, one path per line
   if [ -n "$rev" ]; then
-    git -c core.quotePath=false ls-tree --name-only "$rev" -- security/ docs/security/ 2>/dev/null
+    git -C "$top" -c core.quotePath=false ls-tree --name-only "$rev" -- security/ docs/security/ 2>/dev/null  # from the repo root, wherever it is called from (DE-77)
   else
     for d in security docs/security; do
       [ -d "$top/$d" ] && (cd "$top" && find "$d" -maxdepth 1 -type f 2>/dev/null)
