@@ -5,6 +5,16 @@
 # and SHA-256 (.github/security-scan-tools.lock), gitleaks and shellcheck 0.11.0 by SHA-256. Known limits (Security Program section 6):
 # semgrep's rule packs download fresh each run (rules are data, not code), and npm comes from GitHub's runner image.
 # shellcheck is pinned so GitHub and the Mac run the same version (DE-56, October 31, 2026). A pull request can also change this workflow file itself, which only review of the change catches.
+# Reporting (DE-109, PW-55, PW-56, WA-291): with the RAVENWOOD_SCAN_TOKEN secret (a Ravenwood run token scoped to this
+# repo and its Patchwork asset, the repo variable PATCHWORK_ASSET), .githooks/ci-report.py reports each step to Ravenwood,
+# so the scan shows live on Flight and on Patchwork's Scans page, and on a push or a Scan now it sends the scan report and
+# the package list to Patchwork through Ravenwood. The token is given only to the reporting steps, only on the default
+# branch (its pushes, and a Scan now, which Ravenwood starts there), never on a pull request or any other branch, whose
+# code (ci-report.py included) isn't on the default branch yet. The reporting steps run the system Python in isolated
+# mode (/usr/bin/python3 -I), not the scanners' venv. What remains: every step runs as one user in one job, so code the
+# scan step runs (from the same commit) could outlive it; the token reaches only that repo's scan workflows, push-scan
+# reports and package list on its own item (panel 0.8.0 pass 2, R1-2). Each reporting step has a 3-minute limit and
+# continue-on-error, so reporting never changes the check's result. Without the token the scan runs as before.
 name: Security scan
 on:
   pull_request:
@@ -27,7 +37,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Report the start to Ravenwood
+        env:
+          RAVENWOOD_SCAN_TOKEN: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && secrets.RAVENWOOD_SCAN_TOKEN || '' }}
+          RAVENWOOD_SCAN_ITEM: ${{ vars.RAVENWOOD_SCAN_ITEM }}
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          /usr/bin/python3 -I .githooks/ci-report.py start || true
+          /usr/bin/python3 -I .githooks/ci-report.py step tools running || true
       - name: Install the scanners (pinned)
+        id: tools
         run: |
           set -euo pipefail
           # Every package by version and SHA-256 (.github/security-scan-tools.lock), in a venv of its own.
@@ -47,7 +67,19 @@ jobs:
           shellcheck --version | grep -qx "version: 0.11.0"
           command -v shellcheck npm
           if git ls-files | grep -q 'Cargo\.lock$'; then cargo install cargo-audit --version 0.22.2 --locked --quiet; fi
+      - name: Report the scanners installed
+        if: always()
+        env:
+          RAVENWOOD_SCAN_TOKEN: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && secrets.RAVENWOOD_SCAN_TOKEN || '' }}
+          OUTCOME: ${{ steps.tools.outcome }}
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          R="/usr/bin/python3 -I"; C=.githooks/ci-report.py
+          if [ "$OUTCOME" = success ]; then $R $C step tools passed || true; else $R $C step tools failed "$OUTCOME" || true; fi
+          $R $C step scan running || true
       - name: Full security scan
+        id: scan
         # On a pull request the scanner comes from the target branch, so a change to the scanner can't pass its own
         # check (the allowlist still comes from the pull request: it is the reviewed exception path). The first pull
         # request that adds the scanner has none on its target branch, so it uses its own.
@@ -75,3 +107,34 @@ jobs:
         if: always()
         run: |
           if [ -f "$RUNNER_TEMP/security-scan.md" ]; then cat "$RUNNER_TEMP/security-scan.md" >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Report the result to Ravenwood and Patchwork
+        if: always()
+        env:
+          RAVENWOOD_SCAN_TOKEN: ${{ github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && secrets.RAVENWOOD_SCAN_TOKEN || '' }}
+          RAVENWOOD_SCAN_ITEM: ${{ vars.RAVENWOOD_SCAN_ITEM }}
+          PATCHWORK_ASSET: ${{ vars.PATCHWORK_ASSET }}
+          OUTCOME: ${{ steps.scan.outcome }}
+          JOB: ${{ job.status }}
+          EVENT: ${{ github.event_name }}
+        timeout-minutes: 3
+        continue-on-error: true
+        run: |
+          R="/usr/bin/python3 -I"; C=.githooks/ci-report.py; M="$RUNNER_TEMP/security-scan.md"
+          case "$OUTCOME" in success) RES=pass; ST=passed; SS=passed ;; cancelled) RES=fail; ST=stopped; SS=skipped ;; *) RES=fail; ST=failed; SS=failed ;; esac
+          # Cancelled before the scan began (during the install): the run stopped, it didn't fail.
+          if [ "$JOB" = cancelled ]; then ST=stopped; SS=skipped; fi
+          $R $C step scan "$SS" "$(grep -m1 '^Blocking findings:' "$M" 2>/dev/null || echo "$OUTCOME")" || true
+          if [ "$EVENT" != pull_request ] && [ "$OUTCOME" != skipped ] && [ "$OUTCOME" != cancelled ] && [ -f "$M" ]; then
+            $R $C step packages running || true
+            $R $C record "$M" "$RES" || true
+          elif [ "$EVENT" != pull_request ] && [ "$ST" != stopped ]; then
+            # The scan wrote no report: still recorded, as a fail (panel 0.8.0 pass 3, R2-5).
+            $R $C step packages skipped "no scan report ($OUTCOME)" || true
+            $R $C record-missing "$OUTCOME" || true
+            RES=fail; ST=failed
+          else
+            if [ "$EVENT" = pull_request ]; then WHY="pull request: recorded on the push"; else WHY="stopped"; fi
+            $R $C step packages skipped "$WHY" || true
+            $R $C step record skipped "$WHY" || true
+          fi
+          $R $C finish "$ST" "Scan $RES" || true
