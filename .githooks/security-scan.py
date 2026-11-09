@@ -49,17 +49,19 @@ BREW = {"gitleaks": "gitleaks", "semgrep": "semgrep", "bandit": "bandit", "shell
         "pip-audit": "pip-audit", "npm": "node", "cargo-audit": "cargo-audit"}
 
 
-def run(cmd, cwd=None, timeout=1800, text=True, data=None, extra_env=None):
-    """The one place this script starts a process: a fixed argument list, no shell, the tool's full path."""
+def run(cmd, cwd=None, timeout=1800, text=True, data=None, extra_env=None, drop_env=()):
+    """The one place this script starts a process: a fixed argument list, no shell, the tool's full path.
+    drop_env names variables the tool must not see (DE-118: SHELLCHECK_OPTS can turn checks off)."""
     exe = shutil.which(cmd[0])
     if not exe:
         raise RuntimeError(f"{cmd[0]} is not installed")
-    env = dict(os.environ, SEMGREP_SEND_METRICS="off", NO_COLOR="1", **(extra_env or {}))
+    env = {k: v for k, v in os.environ.items() if k not in drop_env}
+    env.update(SEMGREP_SEND_METRICS="off", NO_COLOR="1", **(extra_env or {}))
     return subprocess.run([exe, *cmd[1:]], cwd=cwd, capture_output=True, text=text, timeout=timeout, env=env, input=data)
 
 
-def sh(cmd, cwd=None, timeout=1800):
-    p = run(cmd, cwd=cwd, timeout=timeout)
+def sh(cmd, cwd=None, timeout=1800, drop_env=()):
+    p = run(cmd, cwd=cwd, timeout=timeout, drop_env=drop_env)
     return p.returncode, p.stdout, p.stderr
 
 
@@ -239,7 +241,10 @@ class Scan:
             return
         for i in range(0, len(scripts), 200):
             chunk = scripts[i:i + 200]
-            rc, out, err = sh(["shellcheck", "-f", "json1", "-x", *[os.path.join(".", c) for c in chunk]], cwd=tree)
+            # --norc and no SHELLCHECK_OPTS: no .shellcheckrc (in the repo, a parent folder or the home folder) and no
+            # environment setting can turn a check off; exceptions go through security/accepted-findings (DE-118)
+            rc, out, err = sh(["shellcheck", "--norc", "-f", "json1", "-x", *[os.path.join(".", c) for c in chunk]], cwd=tree,
+                              drop_env=("SHELLCHECK_OPTS",))
             try:
                 d = json.loads(out)
             except Exception:
@@ -360,8 +365,10 @@ class Scan:
             self.ran.append(("cargo audit", lock))
 
 
-SUPPRESS_FILES = [".gitleaksignore", ".gitleaks.toml", ".semgrepignore", ".bandit"]
-SUPPRESS_RE = re.compile(r"#\s*shellcheck\s+disable=")
+SUPPRESS_FILES = [".gitleaksignore", ".gitleaks.toml", ".semgrepignore", ".bandit", ".shellcheckrc"]
+# A shellcheck directive line with disable= anywhere in it: shellcheck honors several directives on one line, such as
+# "# shellcheck source=x disable=SC2086" (DE-118). The [^\n] run is one pass per line, no nested repetition.
+SUPPRESS_RE = re.compile(r"#\s*shellcheck\s[^\n]*?\bdisable\s*=")
 
 
 def suppressions(s, tree, scripts):
