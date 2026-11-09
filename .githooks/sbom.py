@@ -182,9 +182,7 @@ def tree_from_rev(rev, dest, cwd=None):
         if any(x in tf.SKIP_DIRS for x in parts[:-1]) or any(x in ("", ".", "..") for x in parts):
             continue
         # Every .txt too, so a requirements include with any name is there to read (pass 2 R2-2).
-        # Gradle settings files too, so a build script can be matched to its build root's verification file (DE-116).
         wanted = tf.is_lockfile(base, rel) or base.lower().endswith(".txt") or rel == "security/accepted-findings" or \
-            base in tf.GRADLE_SETTINGS or \
             (parts[0] == "security" and re.fullmatch(r"SBOM-.+\.json", base) and len(parts) == 2)
         if wanted:
             if mode != b"100644" and mode != b"100755":

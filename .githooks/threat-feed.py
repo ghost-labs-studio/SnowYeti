@@ -13,11 +13,18 @@ Fails closed (pass 1 fixes):
   others for now) is NOT CHECKED: security-scan.py reports it as a finding, which blocks unless
   security/accepted-findings accepts it with an expiry and a board key.
 
-Gradle (DE-116, November 9, 2026): a build's gradle/verification-metadata.xml is Gradle's own record of every component
-it resolved (plugins, buildscript and transitive ones included), so it is read as the lockfile, and a build.gradle or
-build.gradle.kts is covered only when its build root (the nearest folder above it with settings.gradle or
-settings.gradle.kts) has one. A verification file that lets any component through unlisted (trust by group, name or
-version, trusted keys, signature checks) is an error. The build scripts themselves are never parsed.
+Gradle (DE-116, November 9, 2026): a build's gradle/verification-metadata.xml is Gradle's own record of the components
+it resolved, so its components are read and checked as Maven packages. A build script (build.gradle,
+build.gradle.kts) is never treated as covered by it (the owner's decision, pass 1: a build can turn verification off
+or pull files Gradle never lists), so it stays NOT CHECKED like any other format without a reader. A verification
+file that could leave components unlisted (any trust, trusted or ignored key, key server, signature checks, metadata
+checks off), or that isn't in the plain form Gradle writes (comments, DOCTYPE, entities, processing instructions,
+a ">" outside a tag, a component tag in any other form), is an error.
+
+pip ceilings (DE-116): a "name<=V" line is read only in a constraints file (named *constraints*, or reached through
+-c; a -r inside it is requirements again, as pip reads it). It never stands for an installed version: it is matched
+to an exact "name==V" pin in a requirements file or lock in the same folder, which is checked in its own right. A
+ceiling with no such pin is NOT CHECKED, as "<file>#<name><=<V>".
 
 Usage:
   threat-feed.py [--json] PATH...      PATH: a repo or a checked-out tree
@@ -26,7 +33,7 @@ Exit 0: no matches and no errors. 1: matches, not-checked lockfiles or errors. 2
 import argparse, hashlib, json, os, re, shutil, stat, subprocess, sys, time
 import shlex
 
-VERSION = "1.5.0"   # DE-116: Gradle verification metadata, pip .lock files, constraint ceilings
+VERSION = "1.5.1"   # DE-116: Gradle verification metadata, pip .lock files, constraint ceilings (pass 1 fixes)
 CACHE = os.path.expanduser("~/.cache/ghost-labs-security/threat-feed")
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/"
@@ -324,21 +331,23 @@ def _pip_lines(path):
         yield first, "".join(pending)
 
 
-def _requirements(path, seen=None, root=None, constraint=None):
+def _requirements(path, seen=None, root=None, constraint=None, ceilings=None):
     """name==version lines, read the way pip reads them. -r and -c includes are followed inside the tree, wherever
     they sit on an option line. An unpinned or wildcard line, or an option the reader doesn't know, is an error: it
     can't be checked against a database of versions.
-    constraint (DE-116): a constraints file (named *constraints*, or reached through -c) installs nothing; it only
-    bounds what pip may pick. There a ceiling "name<=V" is also read, as V: with nothing above V allowed, V is what
-    pip resolves to. Any other range is still an error."""
+    constraint (DE-116): pip reads a file given with -c, or a constraints file used on its own, as limits that install
+    nothing. There a ceiling "name<=V" yields no package; it goes into ceilings as (path, name, V) for lockfiles() to
+    match to an exact pin. A -r inside a constraints file is requirements again (pip reads it so). Anywhere else a
+    ceiling is an error, as before."""
     if constraint is None:
         constraint = "constraints" in os.path.basename(path).lower()
     seen = seen if seen is not None else set()
+    ceilings = ceilings if ceilings is not None else []
     root = root or os.path.dirname(path)
     real = os.path.realpath(path)
-    if real in seen:
+    if (real, constraint) in seen:   # the same file reached as requirements and as constraints is read both ways
         return []
-    seen.add(real)
+    seen.add((real, constraint))
     out = []
     for n, raw in _pip_lines(path):
         line = _pip_strip_comment(raw).strip()
@@ -359,7 +368,7 @@ def _requirements(path, seen=None, root=None, constraint=None):
                 inc = os.path.normpath(os.path.join(os.path.dirname(path), v))
                 if not os.path.realpath(inc).startswith(os.path.realpath(root) + os.sep):
                     raise LockError(f"line {n}: include {inc} is outside the tree")
-                out += _requirements(inc, seen, root, constraint or k in ("-c", "--constraint"))
+                out += _requirements(inc, seen, root, k in ("-c", "--constraint"), ceilings)
             continue
         line = line.split(";", 1)[0].strip()
         line = _drop_pip_options(line)
@@ -367,8 +376,15 @@ def _requirements(path, seen=None, root=None, constraint=None):
         if not m or (m.group(3) == "<=" and not constraint):
             raise LockError(f"line {n}: {line[:60]!r} isn't pinned with ==" + (" (a <= ceiling is read only in a "
                             "constraints file)" if m else ""))
+        if m.group(3) == "<=":
+            ceilings.append((path, m.group(1), exact(m.group(4), m.group(1))))
+            continue
         out.append(("PyPI", m.group(1), exact(m.group(4), m.group(1))))
     return out
+
+
+def _pip_name(name):
+    return re.sub(r"[-_.]+", "-", name).lower()   # PEP 503
 
 
 def _pipfile_lock(path):
@@ -717,65 +733,74 @@ def _nuget(path):
     return out
 
 
-# Gradle's dependency verification file (DE-116). Gradle writes each component on one line, attributes in this order;
-# any other line naming a component is an error, never skipped.
-GRADLE_COMPONENT_RE = re.compile(r'\s*<component group="([A-Za-z0-9][A-Za-z0-9._-]{0,199})" '
-                                 r'name="([A-Za-z0-9][A-Za-z0-9._-]{0,199})" version="([^"<>&\s]{1,100})">')
-GRADLE_KNOWN_RE = re.compile(r"\s*</?components>|\s*</component>")
-GRADLE_TAG_RE = re.compile(r"<\s*/?\s*([\w.-]+:)?components?(?![\w.:-])")   # the element, with or without a prefix
-# What lets a component through without its own <component> entry: trust by group, name or version (trust by file
-# name alone covers only extra files such as sources jars), trusted keys, and signature checks.
-GRADLE_TRUST_RE = re.compile(r"<trust\b[^>]*\b(group|name|version)\s*=|<trusted-keys?\b|<key-servers?\b|"
-                             r"<verify-signatures>\s*true")
-GRADLE_SETTINGS = ("settings.gradle", "settings.gradle.kts")
+# Gradle's dependency verification file (DE-116). Read as tags in one linear pass (pass 1 R1-7): a "<" opens a tag
+# that closes at the next ">" with no "<" inside, and no ">" may stand outside a tag. Gradle escapes both in values.
+GRADLE_MAX_BYTES = 4 * 1024 * 1024
+GRADLE_COMPONENT_RE = re.compile(r'component group="([A-Za-z0-9][A-Za-z0-9._-]{0,199})" '
+                                 r'name="([A-Za-z0-9][A-Za-z0-9._-]{0,199})" version="([^"<>&\s]{1,100})"')
+GRADLE_NAME_RE = re.compile(r"\s*(/?)\s*(?:([\w.-]+):)?([\w.-]+)")
+# Elements that let a component through without its own entry, or switch a check off (pass 1 R1-1, R2-1, R2-6).
+GRADLE_REFUSED = {"trust", "trusted-artifacts", "trusted-key", "trusted-keys", "ignored-key", "ignored-keys",
+                  "key-server", "key-servers"}
+GRADLE_SETTING = {"verify-metadata": "true", "verify-signatures": "false"}   # the only values read (pass 1 R3-1)
+
+
+def _gradle_tags(text):
+    """[(tag text without < >, text after it up to the next tag)], in one linear pass."""
+    out, i = [], 0
+    if ">" in text[:max(text.find("<"), 0)] or "<" not in text:
+        raise LockError("isn't in the form Gradle writes")
+    while True:
+        j = text.find("<", i)
+        if j < 0:
+            return out
+        k = text.find(">", j)
+        if k < 0 or "<" in text[j + 1:k]:
+            raise LockError("has a tag that doesn't close where Gradle closes it")
+        nxt = text.find("<", k)
+        after = text[k + 1:nxt if nxt >= 0 else len(text)]
+        if ">" in after:
+            raise LockError('has a ">" outside a tag, which Gradle never writes')
+        out.append((text[j + 1:k], after))
+        i = k + 1
 
 
 def _gradle_verification(path):
     """Every <component> in a gradle/verification-metadata.xml, as Maven group:name packages."""
-    out = []
+    if os.path.getsize(path) > GRADLE_MAX_BYTES:
+        raise LockError(f"is over {GRADLE_MAX_BYTES} bytes")
     with open(path, encoding="utf-8") as fh:
-        lines = list(_capped(fh))
-    text = "".join(lines)
-    if re.search(r"<!(?!--)|<\?(?!xml\s)|&(?!(amp|lt|gt|quot|apos);)", text):
-        raise LockError("has a DOCTYPE, entity, CDATA or processing instruction, which Gradle never writes")
-    if "<verification-metadata" not in text:
-        raise LockError("isn't a Gradle verification-metadata file")
-    if GRADLE_TRUST_RE.search(text):
-        raise LockError("lets components through without listing them (trust by group, name or version, trusted "
-                        "keys or signature checks), so its list isn't every component the build resolves")
-    for n, raw in enumerate(lines, 1):
-        line = raw.rstrip("\n")
-        if not GRADLE_TAG_RE.search(line):
+        text = "".join(_capped(fh))
+    out, root = [], None
+    for tag, after in _gradle_tags(text):
+        if tag.startswith("?xml ") and tag.endswith("?") and out == [] and root is None:
+            continue   # the declaration; any other "<?", "<!" (comment, DOCTYPE, CDATA) fails the name check below
+        m = GRADLE_NAME_RE.match(tag)
+        if not m:
+            raise LockError(f"has a tag Gradle doesn't write: <{tag[:40]}>")
+        closing, name = m.group(1), m.group(3).lower()
+        root = root or name
+        if name in GRADLE_REFUSED:
+            raise LockError(f"has <{name}>, which lets components through without listing them")
+        if name in GRADLE_SETTING:
+            if not closing and (tag.strip() != name or after.strip() != GRADLE_SETTING[name]):
+                raise LockError(f"sets {name} to something other than {GRADLE_SETTING[name]}")
             continue
-        m = GRADLE_COMPONENT_RE.fullmatch(line)
-        if m:
-            out.append(("Maven", f"{m.group(1)}:{m.group(2)}", exact(m.group(3), f"{m.group(1)}:{m.group(2)}")))
-        elif not GRADLE_KNOWN_RE.fullmatch(line):
-            raise LockError(f"line {n}: a component line that isn't in Gradle's own form")
+        if name == "component" and not closing:
+            c = GRADLE_COMPONENT_RE.fullmatch(tag)
+            if not c:
+                raise LockError(f"has a component tag that isn't in Gradle's own form: <{tag[:60]}>")
+            out.append(("Maven", f"{c.group(1)}:{c.group(2)}", exact(c.group(3), f"{c.group(1)}:{c.group(2)}")))
+    if root != "verification-metadata":
+        raise LockError("isn't a Gradle verification-metadata file")
     if not out:   # Gradle lists at least the plugins a build applies; an empty list isn't read as "nothing to check"
         raise LockError("lists no components")
     return out
 
 
-def _gradle_root_verified(tree, rel):
-    """True when the build script at rel sits in a Gradle build whose root (the nearest folder at or above it with a
-    settings file) has gradle/verification-metadata.xml as a regular file."""
-    top = os.path.realpath(tree)
-    d = os.path.dirname(os.path.join(tree, rel))
-    while True:
-        if any(os.path.isfile(os.path.join(d, s)) for s in GRADLE_SETTINGS):
-            try:
-                return stat.S_ISREG(os.lstat(os.path.join(d, "gradle", "verification-metadata.xml")).st_mode)
-            except OSError:
-                return False
-        if os.path.realpath(d) == top or os.path.dirname(d) == d:
-            return False
-        d = os.path.dirname(d)
-
-
 def is_gradle_verification(rel):
     parts = rel.replace(os.sep, "/").split("/")
-    return parts[-1] == "verification-metadata.xml" and len(parts) > 1 and parts[-2] == "gradle"
+    return parts[-1].lower() == "verification-metadata.xml" and len(parts) > 1 and parts[-2].lower() == "gradle"
 
 
 PARSERS = {"package-lock.json": _npm, "npm-shrinkwrap.json": _npm, "Cargo.lock": lambda p: _toml_packages(p, "crates.io"),
@@ -810,7 +835,7 @@ def not_covered_id(rel):
 
 def lockfiles(tree):
     """(covered [(relpath, [(eco, name, version)])], uncovered [relpath], errors [str])."""
-    covered, uncovered, errors = [], [], []
+    covered, uncovered, errors, ceilings = [], [], [], []
     if not os.path.isdir(tree):
         return [], [], [f"threat feed: {tree} is not a directory"]
     for dp, dns, fns in os.walk(tree):
@@ -828,24 +853,39 @@ def lockfiles(tree):
             if not stat.S_ISREG(st.st_mode):   # a symlink, FIFO or device (pass 1 R2-11)
                 errors.append(f"threat feed: {rel} is not a regular file")
                 continue
-            parser = PARSERS.get(f) or ((lambda x: _requirements(x, root=tree)) if is_requirements(rel) else None) \
-                or (_gradle_verification if is_gradle_verification(rel) else None)
-            if f in ("build.gradle", "build.gradle.kts") and _gradle_root_verified(tree, rel):
-                continue   # its components are read from the build root's verification file (DE-116)
+            if is_gradle_verification(rel) and not rel.replace(os.sep, "/").endswith("gradle/verification-metadata.xml"):
+                errors.append(f"threat feed: {rel} is named in a case Gradle on Linux would not read")   # pass 1 R1-3
+                continue
+            parser = PARSERS.get(f) or ((lambda x: _requirements(x, root=tree, ceilings=ceilings)) if is_requirements(rel)
+                                        else None) or (_gradle_verification if is_gradle_verification(rel) else None)
             if f in UNCOVERED or parser is None:
                 uncovered.append(rel)
                 continue
+            had = len(ceilings)
             try:
                 pkgs = sorted(set(parser(full)))
             except Exception as e:
                 errors.append(f"threat feed: can't read {rel} ({e})")
                 continue
-            if not pkgs and (st.st_size > 200 or _looks_populated(f, full)):
+            if not pkgs and len(ceilings) == had and (st.st_size > 200 or _looks_populated(f, full)):
                 # a lockfile that yields nothing but looks like it lists packages, at any size (DE-102 pass 3 R2-1);
                 # the size rule stays as a second net. A dependency-free lockfile reads as empty.
                 errors.append(f"threat feed: {rel} yields no packages; format not understood")
                 continue
             covered.append((rel, pkgs))
+    # pip ceilings (DE-116): each needs an exact pin of the same version in a covered requirements file or lock in its
+    # own folder; that pin is what gets checked. Without one the ceiling is NOT CHECKED (the owner's decision).
+    pins = {}
+    for rel, pkgs in covered:
+        if is_requirements(rel):
+            for eco, name, version in pkgs:
+                pins.setdefault(os.path.dirname(rel), set()).add((_pip_name(name), version))
+    for path, name, version in ceilings:
+        rel = os.path.normpath(os.path.relpath(path, tree))
+        if (_pip_name(name), version) not in pins.get(os.path.dirname(rel), set()):
+            entry = f"{rel}#{name}<={version}"
+            if entry not in uncovered:
+                uncovered.append(entry)
     return covered, uncovered, errors
 
 
@@ -1000,7 +1040,7 @@ def check(tree, get=fetch, only=None):
     covered, uncovered, errors = lockfiles(tree)
     if only is not None:
         covered = [c for c in covered if c[0] in only]
-        uncovered = [u for u in uncovered if u in only]
+        uncovered = [u for u in uncovered if u.split("#", 1)[0] in only]
         errors = [e for e in errors if any(o in e for o in only)] if only else []
     notes = []
     if not covered:
