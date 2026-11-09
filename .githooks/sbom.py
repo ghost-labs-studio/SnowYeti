@@ -25,7 +25,7 @@ tf = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(tf)
 
 PURL_TYPE = {"npm": "npm", "PyPI": "pypi", "crates.io": "cargo", "SwiftURL": "swift", "RubyGems": "gem",
-             "Packagist": "composer", "NuGet": "nuget"}
+             "Packagist": "composer", "NuGet": "nuget", "Maven": "maven"}   # Maven: Gradle builds (DE-116)
 
 
 def purl(eco, name, version):
@@ -36,6 +36,9 @@ def purl(eco, name, version):
         name = re.sub(r"^https?://", "", name)
         parts = name.split("/")
         return f"pkg:swift/{'/'.join(urllib.parse.quote(p, safe='') for p in parts)}@{urllib.parse.quote(version, safe='')}"
+    if t == "maven" and ":" in name:   # group:name, the purl spec's namespace and name (DE-116)
+        g, n = name.split(":", 1)
+        return f"pkg:maven/{urllib.parse.quote(g, safe='')}/{urllib.parse.quote(n, safe='')}@{urllib.parse.quote(version, safe='')}"
     if t == "composer" and "/" in name:
         ns, n = name.split("/", 1)
         return f"pkg:composer/{urllib.parse.quote(ns, safe='')}/{urllib.parse.quote(n, safe='')}@{urllib.parse.quote(version, safe='')}"
@@ -179,7 +182,9 @@ def tree_from_rev(rev, dest, cwd=None):
         if any(x in tf.SKIP_DIRS for x in parts[:-1]) or any(x in ("", ".", "..") for x in parts):
             continue
         # Every .txt too, so a requirements include with any name is there to read (pass 2 R2-2).
+        # Gradle settings files too, so a build script can be matched to its build root's verification file (DE-116).
         wanted = tf.is_lockfile(base, rel) or base.lower().endswith(".txt") or rel == "security/accepted-findings" or \
+            base in tf.GRADLE_SETTINGS or \
             (parts[0] == "security" and re.fullmatch(r"SBOM-.+\.json", base) and len(parts) == 2)
         if wanted:
             if mode != b"100644" and mode != b"100755":
