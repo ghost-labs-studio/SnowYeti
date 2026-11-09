@@ -1006,7 +1006,7 @@ class Readers116(Base):   # DE-116: Gradle verification metadata, pip .lock file
         got, unc, err = self.got()
         self.assertEqual(err, [])
         self.assertEqual(got["spike/constraints.txt"], [("PyPI", "idna", "3.10")])   # never cryptography 48.0.1
-        self.assertEqual(unc, ["spike/constraints.txt#cryptography<=48.0.1"])
+        self.assertEqual(unc, ["spike/constraints.txt!cryptography<=48.0.1"])
         self.write("spike/runtime-requirements-x86_64.lock", "Cryptography==48.0.1 --hash=sha256:cc\n")
         got, unc, err = self.got()
         self.assertEqual((unc, err), ([], []))   # matched by the exact pin, which is checked itself
@@ -1019,7 +1019,7 @@ class Readers116(Base):   # DE-116: Gradle verification metadata, pip .lock file
                     self.write(path, text)
                 _, unc, err = self.got()
                 self.assertEqual(err, [])
-                self.assertIn("spike/constraints.txt#cryptography<=48.0.1", unc)
+                self.assertIn("spike/constraints.txt!cryptography<=48.0.1", unc)
 
     def test_a_constraints_file_of_only_ceilings_is_not_an_unread_file(self):
         self.write("spike/constraints.txt", "# " + "x" * 300 + "\ncryptography<=48.0.1\n")
@@ -1031,7 +1031,7 @@ class Readers116(Base):   # DE-116: Gradle verification metadata, pip .lock file
         self.write("spike/constraints.txt", "cryptography<=9999\n")
         got, unc, err = self.got()
         self.assertEqual(got.get("spike/constraints.txt", []), [])
-        self.assertEqual(unc, ["spike/constraints.txt#cryptography<=9999"])
+        self.assertEqual(unc, ["spike/constraints.txt!cryptography<=9999"])
         self.assertEqual(err, [])
 
     def test_other_ranges_stay_errors_in_constraints(self):
@@ -1051,7 +1051,7 @@ class Readers116(Base):   # DE-116: Gradle verification metadata, pip .lock file
         got, unc, err = self.got()
         self.assertEqual(err, [])
         self.assertEqual(got["requirements.txt"], [("PyPI", "flask", "2.0.0")])
-        self.assertEqual(unc, ["pins/limits.txt#cryptography<=48.0.1"])
+        self.assertEqual(unc, ["pins/limits.txt!cryptography<=48.0.1"])
 
     def test_a_requirement_inside_constraints_is_requirements_again(self):   # pass 1 G4 (pip: nested -r installs)
         self.write("constraints.txt", "idna==3.10\n-r more.txt\n")
@@ -1068,7 +1068,79 @@ class Readers116(Base):   # DE-116: Gradle verification metadata, pip .lock file
     def test_quick_mode_keeps_a_ceiling_finding(self):
         self.write("spike/constraints.txt", "cryptography<=48.0.1\n")
         _, unc, _, err, _ = tf.check(self.tree, get=Fake(), only={"spike/constraints.txt"})
-        self.assertEqual(unc, ["spike/constraints.txt#cryptography<=48.0.1"])
+        self.assertEqual(unc, ["spike/constraints.txt!cryptography<=48.0.1"])
+        self.write("requirements.txt", "flask==2.0.0\n-c pins/limits.txt\n")   # pass 2 R1-2: only the includer changed
+        self.write("pins/limits.txt", "cryptography<=9999\n")
+        _, unc, _, err, _ = tf.check(self.tree, get=Fake(), only={"requirements.txt"})
+        self.assertIn("pins/limits.txt!cryptography<=9999", unc)
+
+    def test_a_ceiling_id_can_be_accepted_by_the_scan_and_the_sbom(self):   # pass 2 R2-4
+        spec = importlib.util.spec_from_file_location("ss", os.path.join(HERE, "security-scan.py"))
+        ss = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ss)
+        self.write("spike/constraints.txt", "cryptography<=48.0.1\n")
+        _, unc, _ = tf.lockfiles(self.tree)
+        fid = tf.not_covered_id(unc[0])
+        exp = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+        self.write("security/accepted-findings", f"{fid} | {exp} | DE-116: Intel ceiling\n")
+        entries, problems = ss.load_allowlist(os.path.join(self.tree, "security/accepted-findings"), datetime.date.today())
+        self.assertEqual(problems, [])
+        self.assertIn(fid, sb.accepted_not_covered(self.tree))
+
+    def test_a_pin_from_another_ecosystem_does_not_match_a_ceiling(self):   # pass 2 R2-5 (M28)
+        self.write("spike/constraints.txt", "left-pad<=1.3.0\n")
+        self.write("spike/requirements.txt", "flask==2.0.0\n")
+        _, unc, err = tf.lockfiles(self.tree)
+        self.assertEqual(unc, ["spike/constraints.txt!left-pad<=1.3.0"])
+        orig = tf.is_requirements
+        tf.is_requirements = lambda rel: True   # even if a non-pip file were taken for one, its pins don't count
+        try:
+            self.write("spike/package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+                "": {"name": "x"}, "node_modules/left-pad": {"version": "1.3.0"}}}))
+            _, unc, _ = tf.lockfiles(self.tree)
+        finally:
+            tf.is_requirements = orig
+        self.assertIn("spike/constraints.txt!left-pad<=1.3.0", unc)
+
+    def test_upper_case_tags_are_judged_the_same(self):   # pass 2 R2-5 (M15)
+        cfg = GRADLE_HEAD.split("   </configuration>")[0]
+        rest = "   </configuration>\n   <components>\n"
+        self.refused(cfg + '<TRUSTED-ARTIFACTS><TRUST group="com.evil"/></TRUSTED-ARTIFACTS>\n' + rest + GRADLE_ONE + GRADLE_TAIL, "upper trust")
+        self.refused(GRADLE_HEAD + GRADLE_ONE + '<Component group="a.b" name="c" version="1.0">\n</Component>\n' + GRADLE_TAIL, "upper component")
+        self.refused(GRADLE_HEAD + GRADLE_ONE + '<a:b:component group="a.b" name="c" version="1.0">\n' + GRADLE_TAIL, "two prefixes")
+        self.refused(GRADLE_HEAD + GRADLE_ONE + '< component group="a.b" name="c" version="1.0">\n' + GRADLE_TAIL, "leading space")
+
+    def test_a_requirements_file_that_yields_nothing_is_an_error(self):   # pass 2 R2-5 (M31b)
+        self.write("requirements.txt", "# " + "x" * 300 + "\n")
+        got, _, err = self.got()
+        self.assertNotIn("requirements.txt", got)
+        self.assertTrue(any("requirements.txt yields no packages" in e for e in err), err)
+
+    def test_a_tag_over_the_cap_is_an_error(self):   # pass 2 R1-1: the cap stands on its own
+        self.refused(GRADLE_HEAD + GRADLE_ONE.replace('origin="Generated by Gradle"', 'origin="' + "a b" * 1400 + '"') + GRADLE_TAIL, "long tag")
+
+    def test_a_ceiling_reached_two_ways_is_one_finding(self):
+        self.write("spike/constraints.txt", "cryptography<=48.0.1\n")
+        self.write("spike/requirements.txt", "flask==2.0.0\n-c constraints.txt\n")
+        _, unc, err = tf.lockfiles(self.tree)
+        self.assertEqual((unc, err), (["spike/constraints.txt!cryptography<=48.0.1"], []))
+
+    def test_crafted_input_for_the_pass_2_fixes_ends_fast(self):   # pass 2 R1-1 and R2-2
+        cases = {"whitespace tag, many lines": GRADLE_HEAD + "<" + " \n" * 500000 + ">" + GRADLE_ONE + GRADLE_TAIL,
+                 "long tag name": GRADLE_HEAD + "<" + "a" * 1000000 + ">" + GRADLE_ONE + GRADLE_TAIL,
+                 "many tags with names": GRADLE_HEAD + "<abc:def/>\n" * 300000 + GRADLE_ONE + GRADLE_TAIL}
+        for why, text in cases.items():
+            with self.subTest(why):
+                start = time.monotonic()
+                self.refused(text, why) if why != "many tags with names" else self.write("g/gradle/verification-metadata.xml", text)
+                if why == "many tags with names":
+                    self.got()
+                self.assertLess(time.monotonic() - start, 10, why)
+        start = time.monotonic()
+        self.write("spike/constraints.txt", "".join(f"p{i}<=1.0\n" for i in range(200000)))
+        _, unc, _ = tf.lockfiles(self.tree)
+        self.assertEqual(len([u for u in unc if "!" in u]), 200000)
+        self.assertLess(time.monotonic() - start, 30)
 
     def test_sbom_describes_gradle_packages_and_refuses_unaccepted_build_scripts(self):
         self.gradle()

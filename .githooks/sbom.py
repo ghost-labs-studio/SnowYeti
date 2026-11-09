@@ -100,8 +100,8 @@ def accepted_not_covered(tree, today=None):
     if not os.path.isfile(f):
         return ok
     with open(f, encoding="utf-8") as fh:
-        for line in fh:
-            parts = [x.strip() for x in line.split("|")]
+        for line in fh:   # read as security-scan.py's load_allowlist reads it: "#" starts a comment (DE-116 pass 2 R2-4)
+            parts = [x.strip() for x in line.split("#", 1)[0].split("|")]
             if len(parts) != 3 or not parts[0].startswith("threat-feed:not-covered:"):
                 continue
             try:

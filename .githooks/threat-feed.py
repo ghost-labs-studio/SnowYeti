@@ -24,7 +24,7 @@ a ">" outside a tag, a component tag in any other form), is an error.
 pip ceilings (DE-116): a "name<=V" line is read only in a constraints file (named *constraints*, or reached through
 -c; a -r inside it is requirements again, as pip reads it). It never stands for an installed version: it is matched
 to an exact "name==V" pin in a requirements file or lock in the same folder, which is checked in its own right. A
-ceiling with no such pin is NOT CHECKED, as "<file>#<name><=<V>".
+ceiling with no such pin is NOT CHECKED, as "<file>!<name><=<V>" (no "#": accepted-findings reads "#" as a comment).
 
 Usage:
   threat-feed.py [--json] PATH...      PATH: a repo or a checked-out tree
@@ -33,7 +33,7 @@ Exit 0: no matches and no errors. 1: matches, not-checked lockfiles or errors. 2
 import argparse, hashlib, json, os, re, shutil, stat, subprocess, sys, time
 import shlex
 
-VERSION = "1.5.1"   # DE-116: Gradle verification metadata, pip .lock files, constraint ceilings (pass 1 fixes)
+VERSION = "1.5.2"   # DE-116: Gradle verification metadata, pip .lock files, constraint ceilings (pass 2 fixes)
 CACHE = os.path.expanduser("~/.cache/ghost-labs-security/threat-feed")
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/"
@@ -738,7 +738,9 @@ def _nuget(path):
 GRADLE_MAX_BYTES = 4 * 1024 * 1024
 GRADLE_COMPONENT_RE = re.compile(r'component group="([A-Za-z0-9][A-Za-z0-9._-]{0,199})" '
                                  r'name="([A-Za-z0-9][A-Za-z0-9._-]{0,199})" version="([^"<>&\s]{1,100})"')
-GRADLE_NAME_RE = re.compile(r"\s*(/?)\s*(?:([\w.-]+):)?([\w.-]+)")
+# A tag's name: one class run, then at most one prefix colon; no whitespace or other overlap, so linear (pass 2 R1-1).
+GRADLE_NAME_RE = re.compile(r"[\w.-]+(?::[\w.-]+)?")
+GRADLE_MAX_TAG = 4096
 # Elements that let a component through without its own entry, or switch a check off (pass 1 R1-1, R2-1, R2-6).
 GRADLE_REFUSED = {"trust", "trusted-artifacts", "trusted-key", "trusted-keys", "ignored-key", "ignored-keys",
                   "key-server", "key-servers"}
@@ -757,6 +759,8 @@ def _gradle_tags(text):
         k = text.find(">", j)
         if k < 0 or "<" in text[j + 1:k]:
             raise LockError("has a tag that doesn't close where Gradle closes it")
+        if k - j > GRADLE_MAX_TAG:   # before any regex sees it (pass 2 R1-1)
+            raise LockError(f"has a tag over {GRADLE_MAX_TAG} characters")
         nxt = text.find("<", k)
         after = text[k + 1:nxt if nxt >= 0 else len(text)]
         if ">" in after:
@@ -775,10 +779,11 @@ def _gradle_verification(path):
     for tag, after in _gradle_tags(text):
         if tag.startswith("?xml ") and tag.endswith("?") and out == [] and root is None:
             continue   # the declaration; any other "<?", "<!" (comment, DOCTYPE, CDATA) fails the name check below
-        m = GRADLE_NAME_RE.match(tag)
-        if not m:
+        closing = tag.startswith("/")
+        m = GRADLE_NAME_RE.match(tag, 1 if closing else 0)
+        if not m or m.end() < len(tag) and not tag[m.end()].isspace() and tag[m.end():] != "/":
             raise LockError(f"has a tag Gradle doesn't write: <{tag[:40]}>")
-        closing, name = m.group(1), m.group(3).lower()
+        name = m.group(0).rsplit(":", 1)[-1].lower()
         root = root or name
         if name in GRADLE_REFUSED:
             raise LockError(f"has <{name}>, which lets components through without listing them")
@@ -875,16 +880,18 @@ def lockfiles(tree):
             covered.append((rel, pkgs))
     # pip ceilings (DE-116): each needs an exact pin of the same version in a covered requirements file or lock in its
     # own folder; that pin is what gets checked. Without one the ceiling is NOT CHECKED (the owner's decision).
-    pins = {}
+    pins, added = {}, set()
     for rel, pkgs in covered:
         if is_requirements(rel):
             for eco, name, version in pkgs:
-                pins.setdefault(os.path.dirname(rel), set()).add((_pip_name(name), version))
+                if eco == "PyPI":
+                    pins.setdefault(os.path.dirname(rel), set()).add((_pip_name(name), version))
     for path, name, version in ceilings:
         rel = os.path.normpath(os.path.relpath(path, tree))
         if (_pip_name(name), version) not in pins.get(os.path.dirname(rel), set()):
-            entry = f"{rel}#{name}<={version}"
-            if entry not in uncovered:
+            entry = f"{rel}!{name}<={version}"
+            if entry not in added:   # a set: a file of many ceilings stays linear (pass 2 R2-2)
+                added.add(entry)
                 uncovered.append(entry)
     return covered, uncovered, errors
 
@@ -1040,7 +1047,8 @@ def check(tree, get=fetch, only=None):
     covered, uncovered, errors = lockfiles(tree)
     if only is not None:
         covered = [c for c in covered if c[0] in only]
-        uncovered = [u for u in uncovered if u.split("#", 1)[0] in only]
+        # every ceiling stays: its pin or the file bringing it in may be what changed (pass 2 R1-2)
+        uncovered = [u for u in uncovered if u in only or "!" in u]
         errors = [e for e in errors if any(o in e for o in only)] if only else []
     notes = []
     if not covered:
