@@ -175,7 +175,7 @@ class Scan:
         if not self.need("semgrep"):
             return
         packs = ["p/default", "p/secrets"] + sorted({SEMGREP_PACKS[e] for e in exts if e in SEMGREP_PACKS})
-        cmd = ["semgrep", "scan", "--metrics=off", "--json", "--quiet", "--timeout", "60", "--disable-nosem"]
+        cmd = ["semgrep", "scan", "--metrics=off", "--json", "--quiet", "--timeout", "300", "--disable-nosem"]
         for p in packs:
             f = rule_pack(p, self.errors)
             if f:
@@ -194,6 +194,13 @@ class Scan:
             return
         for e in d.get("errors", []):
             lvl = str(e.get("level", "error")).lower()
+            # A rule that ran out of time on a file leaves that file partly unscanned: semgrep reports it as a
+            # warning, but it blocks here like any scanner error, naming the file (DE-54).
+            if "timeout" in str(e.get("type", "")).lower():
+                where = e.get("path") or (e.get("spans") or [{}])[0].get("file") or "a file"
+                where = os.path.relpath(where, tree) if os.path.isabs(str(where)) else where
+                self.errors.append(f"semgrep timed out on {where} (rule {e.get('rule_id') or '?'}): not fully scanned")
+                continue
             if lvl in ("warn", "warning", "info"):
                 continue
             self.errors.append(f"semgrep: {e.get('type')} {str(e.get('message'))[:200]}")
@@ -423,6 +430,9 @@ def check_pins(tree, commit, today):
     problems, notes = [], []
     manifest = os.path.join(tree, "security", "pins")
     if not os.path.exists(manifest):
+        # Every repo carries security/pins, even one that lists nothing, so a missing manifest can't hide an
+        # unreviewed pin (DE-55, owner's decision November 11, 2026).
+        problems.append("security/pins is missing: every repo needs one (comments only if nothing is pinned; DE-55)")
         return problems, notes
     reports = []
     secdir = os.path.join(tree, "security")
