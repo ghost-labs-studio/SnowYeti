@@ -1,0 +1,5 @@
+# security/pins (DE-55): files that pin third-party code a build or check downloads and runs.
+# <pin file> | <max days, at most 30> | <what it pins; board key>
+# Each listed file needs a passing security/PIN-<name>-<YYYY-MM-DD>.md review for its exact contents.
+# Nothing listed yet. The shared GitHub check's own pins (.github/workflows/security-scan.yml and
+# .github/security-scan-tools.lock) are refreshed fleet-wide under DE-99; list them here when this repo reviews them.
