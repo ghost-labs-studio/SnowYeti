@@ -1,0 +1,12 @@
+# Scanner-tool packages the lock (.github/security-scan-tools.lock) holds at another version than a tool's own exact
+# requirement, for a security fix (DE-172). The security-scan job's pip check passes only when pip check passes, or exits
+# 1 and every line it prints is listed below word for word after "conflict: ". Any other conflict, no output, a crash or an
+# empty list still fails the job. Each entry says why; remove it once the tool's own requirement moves past it.
+#
+# mcp 1.30.0 over semgrep's exact mcp==1.29.0 (November 20, 2026): GHSA-qx49-fqc8-xw99 (rated High by the threat
+# feed's OSV record: mcp's OAuth client, mcp.client.auth, sends credentials where the server says) and
+# GHSA-84m7-p3x7-pcfv, GHSA-5h93-6whr-6q8j, GHSA-w4fh-qvv9-3v23 and GHSA-rwrf-2pqf-9j8j, all fixed in 1.30.0 per
+# PyPI's record. Every semgrep run imports mcp (semgrep loads its mcp command at startup, and mcp's package init
+# loads mcp.client.session, session_group, stdio, sse and streamable_http), but never mcp.client.auth; the scan never
+# starts semgrep's MCP server or makes an MCP client connection.
+conflict: semgrep 1.181.0 has requirement mcp==1.29.0, but you have mcp 1.30.0.

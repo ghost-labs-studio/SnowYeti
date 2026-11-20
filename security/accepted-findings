@@ -17,9 +17,5 @@ bandit:B603:.githooks/threat-feed.py:0811de23669e | 2027-04-28 | the threat feed
 bandit:B404:.githooks/test-classify-risk.py:486713869545 | 2027-04-28 | the classifier tests import subprocess to build throwaway git repos; reviewed DE-98
 bandit:B603:.githooks/test-classify-risk.py:bf2081ef8027 | 2027-04-28 | the classifier tests' one process call: git or this Python by full path, fixed args, no shell; reviewed DE-98
 # DE-102 rollout: the owner's DE-56 acceptances for the scanner pins (same tools lock as Lighthouse)
-threat-feed:GHSA-5h93-6whr-6q8j:.github/security-scan-tools.lock:014636cc4c41 | 2027-04-28 | mcp 1.29.0, pinned exactly by semgrep; the scan never runs semgrep's MCP server; accepted DE-56, threat feed id DE-101
-threat-feed:GHSA-84m7-p3x7-pcfv:.github/security-scan-tools.lock:014636cc4c41 | 2027-04-28 | mcp 1.29.0, pinned exactly by semgrep; the scan never runs semgrep's MCP server; accepted DE-56, threat feed id DE-101
-threat-feed:GHSA-rwrf-2pqf-9j8j:.github/security-scan-tools.lock:014636cc4c41 | 2027-04-28 | mcp 1.29.0, pinned exactly by semgrep; the scan never runs semgrep's MCP server; accepted DE-56, threat feed id DE-101
-threat-feed:GHSA-w4fh-qvv9-3v23:.github/security-scan-tools.lock:014636cc4c41 | 2027-04-28 | mcp 1.29.0, pinned exactly by semgrep; the scan never runs semgrep's MCP server; accepted DE-56, threat feed id DE-101
 threat-feed:GHSA-xcq7-p3pf-p88h:.github/security-scan-tools.lock:d4a26776982f | 2027-04-28 | opentelemetry-api 1.37.0, pinned by semgrep; the scan receives no HTTP tracestate; accepted DE-56, threat feed id DE-101
 threat-feed:GHSA-mf5v-w3w3-f6cg:.github/security-scan-tools.lock:d4a26776982f | 2027-04-28 | opentelemetry-api 1.37.0, pinned by semgrep; quadratic-time tracestate parsing, and the scan receives no HTTP tracestate; same class as GHSA-xcq7-p3pf-p88h, accepted DE-56, threat feed id DE-101; owner accepted November 13, 2026 (LN-7, DE-137)
