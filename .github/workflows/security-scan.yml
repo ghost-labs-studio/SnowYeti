@@ -33,7 +33,22 @@ jobs:
           # Every package by version and SHA-256 (.github/security-scan-tools.lock), in a venv of its own.
           python3 -m venv "$RUNNER_TEMP/tools"
           "$RUNNER_TEMP/tools/bin/python" -m pip install --quiet --require-hashes --no-deps -r .github/security-scan-tools.lock
-          "$RUNNER_TEMP/tools/bin/python" -m pip check
+          # pip check, except the conflicts .github/security-scan-tools.overrides lists word for word (DE-172): a
+          # package held newer than a tool's exact pin for a security fix. It passes only when pip check passes, or
+          # exits 1 printing only listed, non-empty lines; no output, a crash, an empty list or any other line fails.
+          PC=$("$RUNNER_TEMP/tools/bin/python" -m pip check 2>&1) && PCRC=0 || PCRC=$?
+          if [ "$PCRC" -ne 0 ]; then
+            printf '%s\n' "$PC"
+            if [ "$PCRC" -ne 1 ] || [ -z "$(printf '%s' "$PC" | tr -d '[:space:]')" ]; then echo "pip check failed (exit $PCRC)"; exit 1; fi
+            ALLOW=$(sed -n 's/^conflict: \([^[:space:]].*\)$/\1/p' .github/security-scan-tools.overrides)
+            if [ -z "$ALLOW" ]; then echo "no conflicts listed in .github/security-scan-tools.overrides"; exit 1; fi
+            while IFS= read -r LINE; do
+              FOUND=no
+              while IFS= read -r OK; do if [ "$LINE" = "$OK" ]; then FOUND=yes; fi; done <<< "$ALLOW"
+              if [ "$FOUND" != yes ]; then echo "pip check conflict not listed in .github/security-scan-tools.overrides: $LINE"; exit 1; fi
+            done <<< "$PC"
+            echo "pip check: only the conflicts listed in .github/security-scan-tools.overrides"
+          fi
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
           curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz
           echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
