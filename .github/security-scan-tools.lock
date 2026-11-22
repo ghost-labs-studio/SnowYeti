@@ -9,7 +9,9 @@
 # header), which semgrep pins exactly, even its newest release; the scan never receives HTTP. mcp is held at 1.30.0
 # over semgrep's exact mcp==1.29.0 for GHSA-qx49-fqc8-xw99 and four more advisories fixed in 1.30.0, a change made by
 # hand on November 20, 2026 (DE-172); .github/security-scan-tools.overrides names the one pip check conflict it
-# causes, and the four mcp 1.29.0 acceptances are retired. Not named requirements*.txt on purpose, so the
+# causes, and the four mcp 1.29.0 acceptances are retired.
+# wcmatch is held at 11.2 (with bracex 3.2) over semgrep's wcmatch~=8.3 for GHSA-53pm-wgxf-c6qf (polynomial-time ReDoS,
+# fixed only in 11.2), a change made by hand on November 20, 2026 (DE-174, as Nexus GL-97); the overrides file names it. Not named requirements*.txt on purpose, so the
 # repo's own pip-audit doesn't treat the scanner's tools as the product's dependencies.
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
@@ -46,9 +48,9 @@ boolean-py==5.0 \
     --hash=sha256:60cbc4bad079753721d32649545505362c754e121570ada4658b852a3a318d95 \
     --hash=sha256:ef28a70bd43115208441b53a045d1549e2f0ec6e3d08a9d142cbc41c1938e8d9
     # via license-expression
-bracex==3.1 \
-    --hash=sha256:35c69fc105f08d77c02722e8ae707c656ff298dd4d26c89bcb3c98fca8bc3614 \
-    --hash=sha256:52002b8455658c21f3b6e5eb0f662b57ec9085f42709e58bc86eeab5bc4c37d7
+bracex==3.2 \
+    --hash=sha256:0a3d40bfae4caae4d3bfd0ea715874799fab711c38fd4012cc35343e815405cd \
+    --hash=sha256:8f3e908a452f66707e1d6d91b3d7d7d4c649d248df18537c0dc710aeb9c30d87
     # via wcmatch
 cachecontrol==0.14.4 \
     --hash=sha256:b7ac014ff72ee199b5f8af1de29d60239954f223e948196fa3d84adaffc71d2b \
@@ -1294,9 +1296,9 @@ uvicorn==0.54.0 \
     --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf \
     --hash=sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620
     # via mcp
-wcmatch==8.5.2 \
-    --hash=sha256:17d3ad3758f9d0b5b4dedc770b65420d4dac62e680229c287bf24c9db856a478 \
-    --hash=sha256:a70222b86dea82fb382dd87b73278c10756c138bd6f8f714e2183128887b9eb2
+wcmatch==11.2 \
+    --hash=sha256:1605bde546fbde4c063628c7d89eda486909fd4337e51d73a873987fbcb2554c \
+    --hash=sha256:952bab83c75c233836007a69550a3a8753cf06964c1eb3b84ff11ad5bff1c272
     # via semgrep
 wrapt==1.17.3 \
     --hash=sha256:02b551d101f31694fc785e58e0720ef7d9a10c4e62c1c9358ce6f63f23e30a56 \

@@ -10,3 +10,8 @@
 # loads mcp.client.session, session_group, stdio, sse and streamable_http), but never mcp.client.auth; the scan never
 # starts semgrep's MCP server or makes an MCP client connection.
 conflict: semgrep 1.181.0 has requirement mcp==1.29.0, but you have mcp 1.30.0.
+
+# wcmatch 11.2 over semgrep's wcmatch~=8.3 (November 20, 2026, DE-174): GHSA-53pm-wgxf-c6qf, polynomial-time ReDoS
+# when matching untrusted names against multi-star patterns, in every release through 11.1 and fixed only in 11.2.
+# semgrep uses wcmatch for its include and exclude globs; 11.2 keeps the glob and fnmatch API semgrep calls.
+conflict: semgrep 1.181.0 has requirement wcmatch~=8.3, but you have wcmatch 11.2.
